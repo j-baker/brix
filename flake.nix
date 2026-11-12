@@ -12,8 +12,6 @@
     # binary the differential tests compare against. Both come from the same
     # revision, and the binary is substituted from the FlakeHub cache.
     nix-src.url = "github:DeterminateSystems/nix-src/v3.24.1";
-    llm-agents.url = "github:numtide/llm-agents.nix";
-    llm-agents.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =
@@ -22,7 +20,6 @@
       nixpkgs,
       crate2nix,
       nix-src,
-      llm-agents,
       ...
     }:
     let
@@ -35,16 +32,6 @@
         system:
         import nixpkgs {
           inherit system;
-          config.allowUnfree = true;
-          overlays = [
-            llm-agents.overlays.shared-nixpkgs
-	    # Todo delete when on 26.11.
-            (_final: prev: {
-              tzdata = prev.tzdata.overrideAttrs {
-                checkTarget = "check_mild back.ck";
-              };
-            })
-          ];
         };
       # The `nix` binary of the reference Nix: the oracle of the differential
       # tests, and the Nix brix hands the commands it does not implement to.
@@ -203,8 +190,6 @@
                   mkdir -p $out/bin
                   ln -s ${openssh}/bin/ssh-keygen $out/bin/ssh-keygen
                 '')
-                pkgs.llm-agents.claude-code
-                pkgs.llm-agents.codex
                 # Regenerates the committed Cargo.nix after dependency
                 # changes: `crate2nix generate`.
                 crate2nix.packages.${system}.default

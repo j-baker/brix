@@ -144,7 +144,6 @@ impl Drop for OpenWalk<'_> {
 }
 
 pub(crate) struct Sparks<'h> {
-
     queue: Mutex<Queued<'h>>,
     changed: Condvar,
     capacity: usize,
@@ -169,10 +168,7 @@ impl<'h> Sparks<'h> {
         self.queue.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    pub fn wait<'a>(
-        &self,
-        queue: MutexGuard<'a, Queued<'h>>,
-    ) -> MutexGuard<'a, Queued<'h>> {
+    pub fn wait<'a>(&self, queue: MutexGuard<'a, Queued<'h>>) -> MutexGuard<'a, Queued<'h>> {
         self.changed.wait(queue).unwrap_or_else(|p| p.into_inner())
     }
 
@@ -218,7 +214,6 @@ impl<'h> Sparks<'h> {
     }
 
     pub fn cancel(&self) {
-
         self.cancelled.store(true, Ordering::Relaxed);
         // Root handles are released outside the lock.
         let dropped = std::mem::take(&mut *self.lock());

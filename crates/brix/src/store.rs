@@ -379,9 +379,7 @@ pub(crate) mod daemon_build {
     use brix_daemon::{BuildMode, DaemonClient, DerivedPath, PathInfo, PathToAdd, ValidPathInfo};
     use brix_eval::{BuildRequest, EvalStoreView};
     use brix_flake::Input;
-    use brix_store::{
-        CanonPath, Hash, HashAlgo, SourceAccessor, StoreDir, StoreObject, StorePath,
-    };
+    use brix_store::{CanonPath, Hash, HashAlgo, SourceAccessor, StoreDir, StoreObject, StorePath};
 
     use crate::error::{Error, Result};
     use crate::host::Tree;
@@ -645,9 +643,7 @@ pub(crate) mod daemon_build {
                 references,
             } => text(path, contents, references),
             StoreObject::SourceTree { .. } => {
-                let nar = view
-                    .source_nar(&path)
-                    .map_err(|e| Error::Store(e.into()))?;
+                let nar = view.source_nar(&path).map_err(|e| Error::Store(e.into()))?;
                 Ok(PathToAdd {
                     info: ValidPathInfo {
                         path: path.clone(),

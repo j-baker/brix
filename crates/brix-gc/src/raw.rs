@@ -1510,10 +1510,7 @@ impl RangeIndex {
         if let Some(pool) = pool {
             parallel::index_blocks(&mut blocks, ranges, variables, pool);
         }
-        Ok(Self {
-            slots,
-            blocks,
-        })
+        Ok(Self { slots, blocks })
     }
 
     fn capacity_bytes(&self) -> usize {

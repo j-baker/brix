@@ -851,9 +851,16 @@ fn lists<'r, 'h>(
                 // One preparation covers every comparison until a fallback.
                 // The borrowed scan ends before forcing can mutate or move cells.
                 let found = (|| {
-                    let ValueView::List(items) = m.heap.view(input) else { unreachable!() };
+                    let ValueView::List(items) = m.heap.view(input) else {
+                        unreachable!()
+                    };
                     match super::managed_builtins::scan_equal_ready(
-                        l, &m.heap, m.heap.cell_view(a[0]), items, index, p,
+                        l,
+                        &m.heap,
+                        m.heap.cell_view(a[0]),
+                        items,
+                        index,
+                        p,
                     )? {
                         super::managed_builtins::EqualityScan::Found => return Ok(true),
                         super::managed_builtins::EqualityScan::Exhausted => {
@@ -868,8 +875,13 @@ fn lists<'r, 'h>(
                     })?;
                     index += 1;
                     Ok(found)
-                })().map_err(|e| {
-                    l.legacy().traced(e, p, "while searching for the presence of the given element in the list")
+                })()
+                .map_err(|e| {
+                    l.legacy().traced(
+                        e,
+                        p,
+                        "while searching for the presence of the given element in the list",
+                    )
                 })?;
                 if found {
                     return Ok(r.bool(true));
@@ -1221,7 +1233,8 @@ mod tests {
         let language = Language::new(legacy);
         for stress in [false, true] {
             with_owned_heap(
-                brix_gc::Config { workers: 0,
+                brix_gc::Config {
+                    workers: 0,
                     chunk_bytes: 256,
                     steady_threshold_bytes: None,
                     trace_collections: false,

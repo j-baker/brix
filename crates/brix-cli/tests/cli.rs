@@ -4071,10 +4071,16 @@ fn flake_check_takes_its_threads_from_the_eval_cores_setting() {
     assert!(parallel("eval-cores = 3", &[]));
     assert!(!parallel("eval-cores = 1", &[]));
     // The command line wins, in either spelling.
-    assert!(!parallel("eval-cores = 3", &["--option", "eval-cores", "1"]));
+    assert!(!parallel(
+        "eval-cores = 3",
+        &["--option", "eval-cores", "1"]
+    ));
     assert!(!parallel("eval-cores = 3", &["--eval-cores", "1"]));
     assert!(parallel("eval-cores = 1", &["--option", "eval-cores", "2"]));
-    assert_eq!(parallel("eval-cores = 1", &["--eval-cores", "0"]), several_by_default);
+    assert_eq!(
+        parallel("eval-cores = 1", &["--eval-cores", "0"]),
+        several_by_default
+    );
 }
 
 #[test]

@@ -550,7 +550,12 @@ fn add_multiple_content_addressed_paths() {
 
     let entries = [
         entry(tree_path.clone(), tree_nar, BTreeSet::new(), tree_ca),
-        entry(flat_path.clone(), flat_nar, BTreeSet::new(), flat_ca.clone()),
+        entry(
+            flat_path.clone(),
+            flat_nar,
+            BTreeSet::new(),
+            flat_ca.clone(),
+        ),
         entry(text_path.clone(), text_nar, text_refs.clone(), text_ca),
     ];
     let mut paths = entries.iter().map(|(info, nar)| {

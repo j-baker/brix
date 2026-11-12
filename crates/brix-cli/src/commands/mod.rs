@@ -271,11 +271,15 @@ impl<'r> Ctx<'r> {
         config.eval.timings = env_switch("BRIX_TIMINGS")?;
         config.gc.trace_collections = config.eval.timings;
         if let Some(workers) = std::env::var_os("BRIX_GC_WORKERS") {
-            config.gc.workers = workers.to_str().and_then(|value| value.parse().ok())
+            config.gc.workers = workers
+                .to_str()
+                .and_then(|value| value.parse().ok())
                 .filter(|&value| value <= 64)
-                .ok_or_else(|| CliError::Brix(brix::Error::Config(
-                    "BRIX_GC_WORKERS must be between 0 (automatic) and 64".into(),
-                )))?;
+                .ok_or_else(|| {
+                    CliError::Brix(brix::Error::Config(
+                        "BRIX_GC_WORKERS must be between 0 (automatic) and 64".into(),
+                    ))
+                })?;
         }
         if let Some(bytes) = std::env::var_os("BRIX_GC_THRESHOLD_BYTES") {
             config.gc.threshold_bytes = bytes

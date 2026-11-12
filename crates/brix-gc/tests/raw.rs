@@ -264,7 +264,7 @@ static DESCRIPTORS: [Descriptor; 5] = [
 fn heap() -> RawHeap {
     RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -581,7 +581,7 @@ fn external_pointers_are_not_traced_and_weak_edges_do_not_retain() {
 fn fixed_cells_have_no_headers_and_collection_rechecks_small_live_budget() {
     let mut heap = RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1054,7 +1054,7 @@ fn remembered_interior_owner_keeps_a_young_cycle_and_weak_edges_alive() {
 fn major_compacts_fragmented_pages_repairs_cycles_and_reuses_dead_slots() {
     let mut heap = RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1140,7 +1140,7 @@ fn major_compacts_fragmented_pages_repairs_cycles_and_reuses_dead_slots() {
 fn variable_compaction_preserves_lengths_alignment_interior_edges_and_drops() {
     let mut heap = RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1227,7 +1227,7 @@ fn nursery_budget_stays_fixed_and_major_budget_grows_with_retained_objects() {
 fn mixed_minor_and_compacting_collections_match_an_owned_graph_model() {
     let mut heap = RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1333,7 +1333,7 @@ fn dead_nursery_buffers_release_unused_promotion_reservations() {
 fn promotion_fills_partial_slabs_without_unnecessary_compaction() {
     let mut heap = RawHeap::new(
         Config {
-        workers: 1,
+            workers: 1,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,

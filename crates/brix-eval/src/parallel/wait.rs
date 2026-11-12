@@ -318,7 +318,6 @@ mod tests {
 
     #[test]
     fn changed_state_does_not_create_a_cycle_or_allocate_a_ticket() {
-
         let registry = WaitRegistry::new(1);
         let a = WorkerId::from_index(0);
         assert!(registry.register(a, a, || false).unwrap().is_none());

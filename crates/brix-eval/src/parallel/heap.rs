@@ -242,12 +242,7 @@ impl<'h> Heap<'h> {
     }
 
     pub fn claim(&self, cell: CellRoot<'_, 'h>) -> Claim {
-        unsafe {
-            cell.raw.read()
-                .as_ref()
-                .publication
-                .claim(self.worker())
-        }
+        unsafe { cell.raw.read().as_ref().publication.claim(self.worker()) }
     }
 
     pub fn wait_on(
@@ -267,11 +262,7 @@ impl<'h> Heap<'h> {
     }
 
     pub fn read_suspension<'v>(&'v self, cell: CellRoot<'_, 'h>) -> ValueView<'v, 'h> {
-        self.decode(unsafe {
-            cell.raw.read()
-                .as_ref()
-                .load_owned(self.worker())
-        })
+        self.decode(unsafe { cell.raw.read().as_ref().load_owned(self.worker()) })
     }
 
     pub fn suspension_value<'r>(
@@ -279,11 +270,7 @@ impl<'h> Heap<'h> {
         roots: &Roots<'r, 'h>,
         cell: CellRoot<'_, 'h>,
     ) -> ValueRoot<'r, 'h> {
-        roots.push::<ValueKind>(unsafe {
-            cell.raw.read()
-                .as_ref()
-                .load_owned(self.worker())
-        })
+        roots.push::<ValueKind>(unsafe { cell.raw.read().as_ref().load_owned(self.worker()) })
     }
 
     pub fn store(&mut self, cell: CellRoot<'_, 'h>, value: ValueRoot<'_, 'h>) {

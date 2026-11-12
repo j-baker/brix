@@ -125,7 +125,10 @@ fn idle_workers_instantiate_dependencies_before_the_consumer_reaches_them() {
         let result = job(&mut ev, &source).unwrap();
         let stats = &ev.legacy().stats;
         if cores > 1 {
-            assert!(stats.sparks_started.get() >= 4, "a walk and three dependencies");
+            assert!(
+                stats.sparks_started.get() >= 4,
+                "a walk and three dependencies"
+            );
             assert!(stats.sparks_completed.get() >= 4);
             assert!(ev.gc_stats().collections > 0);
         }

@@ -68,7 +68,6 @@ fn ordered_builtin(name: &str) -> bool {
 
 #[derive(Clone, Copy)]
 struct Primop<'a> {
-
     name: &'a str,
     dispatch_name: &'a str,
     handler: crate::managed_builtins::Handler,
@@ -2322,8 +2321,7 @@ impl<'a> Language<'a> {
     ) -> Result<ValueRoot<'r, 'h>> {
         let primop = self.primop(id);
         #[cfg(brix_parallel)]
-        if m.background.is_some()
-            && (primop.has_callback || ordered_builtin(primop.dispatch_name))
+        if m.background.is_some() && (primop.has_callback || ordered_builtin(primop.dispatch_name))
         {
             crate::runtime::note_deferral(format_args!("builtins.{}", primop.dispatch_name));
             return Err(crate::error::deferred());

@@ -397,7 +397,6 @@ impl Machine<'_> {
 
     #[inline]
     pub fn poll_background(&self) -> Result<()> {
-
         if self
             .background
             .as_ref()

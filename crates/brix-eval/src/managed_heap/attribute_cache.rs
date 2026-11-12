@@ -256,7 +256,13 @@ mod tests {
                     heap.profile_attribute_lookup(&stats, heap.bindings_view(set), name, false, 0);
                 }
                 heap.collect().unwrap();
-                heap.profile_attribute_lookup(&stats, heap.bindings_view(set), Symbol(17), false, 0);
+                heap.profile_attribute_lookup(
+                    &stats,
+                    heap.bindings_view(set),
+                    Symbol(17),
+                    false,
+                    0,
+                );
                 assert_eq!(stats.attribute_probe_total.get(), 5);
                 assert_eq!(stats.attribute_probe_missing.get(), 5);
                 assert_eq!(stats.attribute_probe_shapes[0].get(), 5);

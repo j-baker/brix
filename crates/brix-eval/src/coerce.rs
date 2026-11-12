@@ -669,10 +669,7 @@ impl<'a> crate::host::EvalStoreView for Evaluator<'a> {
         self.store.borrow().get(path).cloned()
     }
 
-    fn source_nar(
-        &self,
-        path: &StorePath,
-    ) -> std::result::Result<crate::host::SourceNar, String> {
+    fn source_nar(&self, path: &StorePath) -> std::result::Result<crate::host::SourceNar, String> {
         use brix_store::{ContentAddressMethod, HashAlgo};
         let (accessor, source_path, ca) = self.source_object(path)?;
         let (hash, size) = match ca.method {

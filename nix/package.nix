@@ -61,7 +61,8 @@ let
 
   crateOverrides = pkgs.defaultCrateOverrides // {
     brix-alloc = _attrs: { DEP_MIMALLOC_INCLUDE_DIR = "${mimallocInclude}"; };
-    brix-eval-parallel = _attrs: parallelSource "brix-eval-parallel" "brix-eval" "brix_eval_parallel" "lib.rs";
+    brix-eval-parallel =
+      _attrs: parallelSource "brix-eval-parallel" "brix-eval" "brix_eval_parallel" "lib.rs";
     brix-parallel = _attrs: parallelSource "brix-parallel" "brix" "brix_parallel" "lib.rs";
     brix-cli-parallel =
       _attrs: parallelSource "brix-cli-parallel" "brix-cli" "brix_cli_parallel" "main.rs";

@@ -13,16 +13,16 @@ use std::thread::{self, JoinHandle};
 use bstr::BString;
 
 use crate::client::{ClientOptions, ClientSettings, DaemonClient, PathToAdd};
-use crate::types::{PathInfo, ValidPathInfo};
-use brix_store::{ContentAddressMethod, HashFormat};
 use crate::error::DaemonError;
 use crate::logger::{Field, RecordingLogger, ResultType};
 use crate::protocol::{self, BuildMode, ProtocolVersion, Trust};
 use crate::transport::Connection;
+use crate::types::{PathInfo, ValidPathInfo};
 use brix_store::{
     CanonPath, ContentAddress, Derivation, DerivationOutput, DerivedPath, Hash, HashAlgo,
     MemoryAccessor, OutputsSpec, SourceAccessor, StoreDir, StorePath,
 };
+use brix_store::{ContentAddressMethod, HashFormat};
 
 use crate::types::BuildStatus;
 use crate::uri::StoreUri;

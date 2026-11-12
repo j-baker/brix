@@ -38,7 +38,11 @@ pub(crate) struct StackWindow {
     span: usize,
 }
 
-crate::runtime::thread_cell!(StackWindowCell, StackWindow, StackWindow { floor: 0, span: 0 });
+crate::runtime::thread_cell!(
+    StackWindowCell,
+    StackWindow,
+    StackWindow { floor: 0, span: 0 }
+);
 
 impl StackWindow {
     /// The window from `top`, an address on the running segment, down to

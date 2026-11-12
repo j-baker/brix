@@ -62,7 +62,6 @@ impl Publication {
 
     #[inline]
     pub fn state(&self) -> State {
-
         loop {
             let word = self.0.load(Ordering::Acquire);
             if word != INSPECTING {
@@ -102,12 +101,10 @@ impl Publication {
     /// Completed/running cells are returned to the caller for classification.
     pub fn inspect<T>(&self, read: impl FnOnce() -> T) -> Result<T, State> {
         loop {
-            match self.0.compare_exchange(
-                EMPTY,
-                INSPECTING,
-                Ordering::Acquire,
-                Ordering::Acquire,
-            ) {
+            match self
+                .0
+                .compare_exchange(EMPTY, INSPECTING, Ordering::Acquire, Ordering::Acquire)
+            {
                 Ok(_) => {
                     struct Restore<'a>(&'a AtomicU32, u32);
                     impl Drop for Restore<'_> {

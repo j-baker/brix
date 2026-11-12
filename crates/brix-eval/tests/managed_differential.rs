@@ -25,7 +25,8 @@ fn managed(host: &TestHost, config: Config, expression: &str, stress: bool) -> O
     let arena = Arena::new();
     let mut evaluator = GcEvaluator::new(
         Evaluator::new(&arena, config, host),
-        GcConfig { workers: 0,
+        GcConfig {
+            workers: 0,
             stress,
             steady_threshold_bytes: None,
             trace_collections: false,

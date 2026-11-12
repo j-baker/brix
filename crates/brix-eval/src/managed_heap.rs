@@ -21,11 +21,11 @@ use brix_gc::raw::{RawHeap, Tracer};
 mod parallel_heap;
 #[path = "managed_heap/weak_seen.rs"]
 mod weak_seen;
-pub(crate) use weak_seen::{Address, WeakSeen};
 use brix_gc::roots::{self as raw_roots, RootDescriptor, RootKind, RootRegistry};
 use brix_gc::{Config, Error, Result, Stats};
 use brix_store::AccessorId;
 use smallvec::SmallVec;
+pub(crate) use weak_seen::{Address, WeakSeen};
 
 use crate::heap_layout::*;
 use crate::symbol::Symbol;
@@ -480,16 +480,12 @@ impl<'h> Heap<'h> {
         }
     }
     pub fn mark_visited(&self, visited: &Visited<'h>, cell: CellRoot<'_, 'h>) -> bool {
-        visited
-            .cells
-            .borrow_mut()
-            .insert(cell.raw.read().addr())
+        visited.cells.borrow_mut().insert(cell.raw.read().addr())
     }
     /// Returns true the first time this cell is seen. Dead entries do not retain
     /// cells and disappear at collection; survivors are rekeyed after movement.
     pub fn mark_seen(&mut self, cell: CellRoot<'_, 'h>) -> bool {
-        self.weak_seen
-            .insert(cell.raw.read().addr())
+        self.weak_seen.insert(cell.raw.read().addr())
     }
     pub fn mark_bindings_visited(
         &self,

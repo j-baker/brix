@@ -102,7 +102,8 @@ fn derivation_cache_does_not_survive_collection_or_keep_sets_alive() {
 use crate::error::{ErrorKind, EvalError};
 
 fn stress() -> Config {
-    Config { workers: 0,
+    Config {
+        workers: 0,
         chunk_bytes: 256,
         steady_threshold_bytes: None,
         trace_collections: false,
@@ -341,7 +342,8 @@ fn persistent_leases_keep_only_live_values_across_scopes() {
 #[test]
 fn bounded_churn_collects_inside_a_live_root_scope() {
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             stress: false,
             chunk_bytes: 256,
             steady_threshold_bytes: None,
@@ -626,7 +628,8 @@ fn list_concat_preserves_empty_aliases_and_children_through_both_allocations() {
 #[test]
 fn list_concat_collects_on_the_real_heap_threshold() {
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             chunk_bytes: 256,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -747,7 +750,8 @@ fn lazy_map_attrs_preserves_graph_after_inputs_and_name_leases_drop() {
 #[test]
 fn lazy_map_attrs_accounts_for_pending_applications_before_batch() {
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             chunk_bytes: 128,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1499,7 +1503,8 @@ fn mixed_flat_lazy_batch_budgets_only_cells_that_need_allocation() {
         .collect();
     let plan = FlatLazyPlan::new(SrcPos::NONE, &attrs).unwrap();
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             chunk_bytes: 256,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1674,7 +1679,8 @@ fn flat_thunk_batch_accounts_for_pending_cells_and_attrs() {
     let attrs = thunk_plan_attrs(64);
     let plan = FlatThunkPlan::new(SrcPos(77), &attrs).unwrap();
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             stress: false,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -1936,7 +1942,8 @@ fn concatenated_contexts_validate_before_gc_and_recover_from_allocation_failure(
 #[test]
 fn concatenated_contexts_count_pending_extent_at_real_threshold() {
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             chunk_bytes: 256,
             steady_threshold_bytes: None,
             trace_collections: false,
@@ -2034,7 +2041,8 @@ fn fused_concat_shares_context_owners_and_preserves_empty_cache() {
 #[test]
 fn fused_concat_preflights_the_combined_extent_before_allocating_bytes() {
     with_heap(
-        Config { workers: 0,
+        Config {
+            workers: 0,
             chunk_bytes: 256,
             steady_threshold_bytes: None,
             trace_collections: false,

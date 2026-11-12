@@ -111,7 +111,8 @@
 
       # `nix build .#checks.x86_64-linux.canBuild` is the build-time CI gate
       # executed by the Trustless build runner; `tests` runs every crate's
-      # test suite inside the sandbox.
+      # test suite inside the sandbox, and nix/checks.nix adds the source
+      # checks (formatting, Clippy, wasm, Cargo.nix).
       checks = forAllSystems (
         system:
         let
@@ -123,6 +124,11 @@
           inherit (built) tests;
           modules = import ./nix/tests/modules.nix { pkgs = pkgsFor system; };
           devShell = self.devShells.${system}.default;
+        }
+        // import ./nix/checks.nix {
+          pkgs = pkgsFor system;
+          formatter = self.formatter.${system};
+          crate2nix = crate2nix.packages.${system}.default;
         }
       );
 

@@ -105,6 +105,7 @@ pub(crate) struct Spark<'h> {
 /// evaluating the same derivation's attributes, in the same order: it finds
 /// work for others, but does little that the other worker would not do next.
 /// With fewer idle workers than queued evaluations there is nothing to find.
+#[derive(Default)]
 pub(crate) struct Queued<'h> {
     /// Newest last, and taken first: the consumer reaches the oldest soonest
     /// (as did the workers before this one), so the newest is the least
@@ -117,16 +118,6 @@ pub(crate) struct Queued<'h> {
     /// entry with it, so this holds no more than the workers' call stacks.
     walks: BTreeMap<u64, Spark<'h>>,
     next_walk: u64,
-}
-
-impl Default for Queued<'_> {
-    fn default() -> Self {
-        Self {
-            evaluations: VecDeque::new(),
-            walks: BTreeMap::new(),
-            next_walk: 0,
-        }
-    }
 }
 
 /// One `derivationStrict` call's offer of its arguments, withdrawn on drop.

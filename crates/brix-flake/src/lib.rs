@@ -30,14 +30,17 @@ pub use call_flake::{
     call_flake_args, prefetch_plan, source_info, CallFlakeArgs, CallFlakeOverride, SourceInfo,
 };
 pub use error::{Error, Result};
-pub use fetch::{fetch_input, fetch_input_unhashed, FetchedTree, Fetcher, NoFetcher};
+pub use fetch::{
+    fetch_input, fetch_input_unhashed, ArchiveMembers, ArchiveObserver, FetchedTree, Fetcher,
+    NoFetcher,
+};
 pub use flake::{
     lock_flake, parse_flake_metadata, FetchedInput, Flake, FlakeAttr, FlakeDir, FlakeInput,
     FlakeInputs, FlakeMetadata, FlakeValue, LockDeps, LockFlags, LockWrite, LockedFlake,
 };
 pub use flakeref::{parse_flake_ref, parse_flake_ref_with_fragment, FlakeRef, ParseOptions};
 pub use hashes::{GitRev, NarHash};
-pub use input::{FetchSettings, Input, Scheme, Warn};
+pub use input::{ArchiveWatch, FetchSettings, Input, Scheme, Warn};
 pub use lockfile::{Edge, InputAttrPath, LockFile, LockedNode, Node, NodeId};
 #[cfg(feature = "native")]
 pub use native::{reuse_from_store, FetchCache, NativeFetcher};

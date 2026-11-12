@@ -136,7 +136,18 @@ impl NativeHost {
             })?;
             allowed.push(CanonPath::new(bytes)?);
         }
+        let images = crate::compiled::ImageStore::new(
+            &config.compiled,
+            &fetch_cache_dir(config)?,
+            config.progress.clone(),
+            brix_store::XpSettings::from_names(
+                config.eval.experimental_features.iter().map(String::as_str),
+            ),
+            config.eval.timings,
+        );
         let settings = FetchSettings {
+            // Inputs that arrive as archives are compiled as they arrive.
+            archive_observer: Some(images.archive_observer()),
             access_tokens: config.fetch.access_tokens.clone(),
             experimental_features: config.eval.experimental_features.clone(),
             tarball_ttl: config.fetch.tarball_ttl,
@@ -211,15 +222,7 @@ impl NativeHost {
             next_call: Cell::new(1),
             flake_registry: config.fetch.flake_registry.clone(),
             registries: RefCell::new(None),
-            images: crate::compiled::ImageStore::new(
-                &config.compiled,
-                &fetch_cache_dir(config)?,
-                config.progress.clone(),
-                brix_store::XpSettings::from_names(
-                    config.eval.experimental_features.iter().map(String::as_str),
-                ),
-                config.eval.timings,
-            ),
+            images,
         })
     }
 

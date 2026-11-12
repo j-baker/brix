@@ -132,6 +132,7 @@ impl Drop for Session {
         let teardown = self.config.teardown;
         self.cell.with_dependent_mut(|owner, inner| {
             owner.host.cancel_prefetches();
+            owner.host.images().finish_compiling();
             owner.host.close_store();
             match teardown {
                 Teardown::Free => {}
@@ -230,7 +231,15 @@ impl Session {
                 ev: Some(RefCell::new(ev)),
             })
         })?;
-        Ok(Session { cell, config })
+        let session = Session { cell, config };
+        // The inputs the session downloads are compiled as they arrive,
+        // for the evaluator it now has.
+        session.with(|ctx| {
+            ctx.host
+                .images()
+                .set_compile_context(ctx.ev.services().image_compile_context())
+        });
+        Ok(session)
     }
 
     pub fn config(&self) -> &Config {

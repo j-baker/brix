@@ -10,7 +10,7 @@ use crate::fetch::FetchedTree;
 use crate::hashes::GitRev;
 use crate::input::{FetchSettings, Input, Scheme};
 use crate::native::http::HttpClient;
-use crate::native::tarball::unpack_archive;
+use crate::native::tarball::{download_archive, DownloadedArchive};
 use crate::{err, Error, Result};
 
 fn host(input: &Input) -> Result<String> {
@@ -219,10 +219,18 @@ pub fn fetch(http: &HttpClient, settings: &FetchSettings, input: &Input) -> Resu
     let (url, headers) = download_url(settings, scheme, &input, &rev)?;
     // `downloadArchive`'s activity, which covers the download too.
     (settings.info)(&format!("unpacking '{input}' into the Git cache..."));
-    let download = http
-        .download(&url, &headers, settings)
-        .map_err(|e: Error| e.trace(format!("while downloading '{url}'")))?;
-    let unpacked = unpack_archive(&download.data, &url, &*settings.warn)?;
+    let expected = input.nar_hash()?;
+    let DownloadedArchive {
+        unpacked, members, ..
+    } = download_archive(
+        http,
+        &url,
+        &headers,
+        settings,
+        &url,
+        expected.as_ref(),
+        &|e: Error| e.trace(format!("while downloading '{url}'")),
+    )?;
     input
         .attrs
         .insert("lastModified".into(), Attr::Int(unpacked.last_modified));
@@ -235,8 +243,12 @@ pub fn fetch(http: &HttpClient, settings: &FetchSettings, input: &Input) -> Resu
     input
         .attrs
         .insert("narHash".into(), Attr::String(nar_hash.to_sri()));
+    let accessor: Arc<dyn brix_store::SourceAccessor> = Arc::new(tree);
+    if let Some(members) = members {
+        members.finish(&nar_hash, unpacked.stripped.as_deref(), accessor.clone());
+    }
     Ok(FetchedTree {
-        accessor: Arc::new(tree),
+        accessor,
         input,
         verified: false,
     })

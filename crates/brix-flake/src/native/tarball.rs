@@ -33,7 +33,8 @@ use brix_store::accessor::MemoryNode;
 use brix_store::{BStr, CanonPath, MemoryAccessor};
 
 use crate::attrs::{get_str_attr, Attr};
-use crate::fetch::FetchedTree;
+use crate::fetch::{ArchiveMembers, FetchedTree};
+use crate::hashes::NarHash;
 use crate::input::{FetchSettings, Input, Scheme};
 use crate::native::http::HttpClient;
 use crate::{err, Result};
@@ -45,6 +46,9 @@ pub struct Unpacked {
     pub tree: MemoryAccessor,
     /// The newest member mtime, as `unpackTarfileToSink` returns it.
     pub last_modified: u64,
+    /// The name of the archive's single top-level directory, when `tree`
+    /// is that directory's contents (`dereferenceSingletonDirectory`).
+    pub stripped: Option<Vec<u8>>,
 }
 
 /// `TarArchive` + `unpackTarfileToSink` + `dereferenceSingletonDirectory`:
@@ -57,8 +61,133 @@ pub fn unpack_archive(data: &[u8], name_hint: &str, warn: &dyn Fn(&str)) -> Resu
     } else {
         unpack_tar(&decompressed, warn)?
     };
-    dereference_singleton_directory(&mut unpacked.tree);
+    unpacked.stripped = dereference_singleton_directory(&mut unpacked.tree);
     Ok(unpacked)
+}
+
+/// How an archive is compressed, by its magic bytes (libarchive's "filter
+/// all").
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Compression {
+    None,
+    Gzip,
+    Bzip2,
+    Xz,
+    Zstd,
+}
+
+impl Compression {
+    fn of(data: &[u8]) -> Compression {
+        if data.starts_with(&[0x1f, 0x8b]) {
+            Compression::Gzip
+        } else if data.starts_with(b"BZh") {
+            Compression::Bzip2
+        } else if data.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
+            Compression::Xz
+        } else if data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+            Compression::Zstd
+        } else {
+            Compression::None
+        }
+    }
+
+    /// `data`, decompressed as it is read.
+    fn reader<'r>(self, data: impl Read + 'r) -> std::io::Result<Box<dyn Read + 'r>> {
+        Ok(match self {
+            Compression::None => Box::new(data),
+            Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(data)),
+            Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(data)),
+            Compression::Xz => Box::new(xz2::read::XzDecoder::new_multi_decoder(data)),
+            Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(data)?),
+        })
+    }
+}
+
+/// [`unpack_archive`] of an archive that is still arriving: `data` is
+/// decompressed and unpacked as it is read, and `members` shown each
+/// regular file as it is unpacked. `None` when this cannot be done, or
+/// goes wrong: [`unpack_archive`] of the whole archive then says what the
+/// archive unpacks to, or why it does not. A zip archive is such a one
+/// (its directory is at its end), and so is anything `data` fails to
+/// deliver. The warnings of an archive unpacked this way go to `warn`
+/// once it has unpacked, in the order [`unpack_archive`] gives them.
+pub fn unpack_stream(
+    mut data: &mut dyn Read,
+    name_hint: &str,
+    warn: &dyn Fn(&str),
+    members: Option<&mut (dyn ArchiveMembers + '_)>,
+) -> Option<Unpacked> {
+    // The magic bytes say what the archive is.
+    let mut magic = Vec::with_capacity(6);
+    (&mut data).take(6).read_to_end(&mut magic).ok()?;
+    if is_zip(&magic) || name_hint.to_lowercase().ends_with(".zip") {
+        return None;
+    }
+    let mut decompressed = Compression::of(&magic)
+        .reader(Cursor::new(magic).chain(data))
+        .ok()?;
+    let warnings = std::cell::RefCell::new(Vec::new());
+    let mut unpacked = unpack_tar_from(
+        &mut decompressed,
+        &|warning| warnings.borrow_mut().push(warning.to_owned()),
+        members,
+    )
+    .ok()?;
+    // What follows the archive's end is decompressed too, as it is when
+    // the whole archive is decompressed first: damage there is an error.
+    std::io::copy(&mut decompressed, &mut std::io::sink()).ok()?;
+    for warning in warnings.into_inner() {
+        warn(&warning);
+    }
+    unpacked.stripped = dereference_singleton_directory(&mut unpacked.tree);
+    Some(unpacked)
+}
+
+/// Downloads the archive at `url` and unpacks it, as it arrives when that
+/// can be done ([`unpack_stream`]): the archive observer of `settings`,
+/// if there is one, is shown its members meanwhile. `nar_hash` is the
+/// hash the tree is expected to have, and `download_error` what becomes
+/// of an error of the download itself. The members are returned for the
+/// caller to finish, once it knows the tree's hash.
+pub(super) fn download_archive(
+    http: &HttpClient,
+    url: &str,
+    headers: &[(String, String)],
+    settings: &FetchSettings,
+    name_hint: &str,
+    nar_hash: Option<&NarHash>,
+    download_error: &dyn Fn(crate::Error) -> crate::Error,
+) -> Result<DownloadedArchive> {
+    let mut streamed = None;
+    let download = http.download_streaming(url, headers, settings, &mut |body| {
+        let mut members = settings
+            .archive_observer
+            .as_ref()
+            .and_then(|watch| watch.0.begin(nar_hash));
+        streamed = unpack_stream(body, name_hint, &*settings.warn, members.as_deref_mut())
+            .map(|unpacked| (unpacked, members));
+    });
+    let download = download.map_err(download_error)?;
+    let (unpacked, members) = match streamed {
+        Some(streamed) => streamed,
+        None => (
+            unpack_archive(&download.data, name_hint, &*settings.warn)?,
+            None,
+        ),
+    };
+    Ok(DownloadedArchive {
+        download,
+        unpacked,
+        members,
+    })
+}
+
+/// What [`download_archive`] returns.
+pub(super) struct DownloadedArchive {
+    pub download: super::http::Download,
+    pub unpacked: Unpacked,
+    /// The archive's members as its observer was shown them, to finish.
+    pub members: Option<Box<dyn ArchiveMembers>>,
 }
 
 fn is_zip(data: &[u8]) -> bool {
@@ -70,26 +199,15 @@ fn is_zip(data: &[u8]) -> bool {
 fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let io = |e: std::io::Error| err!("decompressing archive: {}", e);
-    if data.starts_with(&[0x1f, 0x8b]) {
-        flate2::read::MultiGzDecoder::new(data)
-            .read_to_end(&mut out)
-            .map_err(io)?;
-    } else if data.starts_with(b"BZh") {
-        bzip2::read::MultiBzDecoder::new(data)
-            .read_to_end(&mut out)
-            .map_err(io)?;
-    } else if data.starts_with(&[0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00]) {
-        xz2::read::XzDecoder::new_multi_decoder(data)
-            .read_to_end(&mut out)
-            .map_err(io)?;
-    } else if data.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        zstd::stream::read::Decoder::new(data)
-            .map_err(io)?
-            .read_to_end(&mut out)
-            .map_err(io)?;
-    } else {
+    let compression = Compression::of(data);
+    if compression == Compression::None {
         return Ok(data.to_vec());
     }
+    compression
+        .reader(data)
+        .map_err(io)?
+        .read_to_end(&mut out)
+        .map_err(io)?;
     Ok(out)
 }
 
@@ -98,7 +216,17 @@ fn decompress(data: &[u8]) -> Result<Vec<u8>> {
 /// libarchive cannot convert is warned about on `warn`, as Nix does
 /// (`getting archive member '…': …`), and kept with its bytes.
 pub(super) fn unpack_tar(data: &[u8], warn: &dyn Fn(&str)) -> Result<Unpacked> {
-    let mut archive = tar::Archive::new(Cursor::new(data));
+    unpack_tar_from(&mut Cursor::new(data), warn, None)
+}
+
+/// [`unpack_tar`] of an archive as it is read, showing `members` each
+/// regular file as it is unpacked.
+fn unpack_tar_from(
+    data: &mut dyn Read,
+    warn: &dyn Fn(&str),
+    mut members: Option<&mut (dyn ArchiveMembers + '_)>,
+) -> Result<Unpacked> {
+    let mut archive = tar::Archive::new(data);
     archive.set_preserve_permissions(true);
     archive.set_unpack_xattrs(false);
     let mut tree = MemoryAccessor::new();
@@ -139,6 +267,9 @@ pub(super) fn unpack_tar(data: &[u8], warn: &dyn Fn(&str)) -> Result<Unpacked> {
                 entry
                     .read_to_end(&mut contents)
                     .map_err(|e| err!("cannot read file from tarball: {}", e))?;
+                if let Some(members) = members.as_deref_mut() {
+                    members.file(&path, &contents);
+                }
                 let node = MemoryNode::Regular {
                     executable: mode & 0o100 != 0,
                     contents,
@@ -190,6 +321,7 @@ pub(super) fn unpack_tar(data: &[u8], warn: &dyn Fn(&str)) -> Result<Unpacked> {
     Ok(Unpacked {
         tree,
         last_modified,
+        stripped: None,
     })
 }
 
@@ -287,6 +419,7 @@ fn unpack_zip(data: &[u8], zone: &TimeZone, warn: &dyn Fn(&str)) -> Result<Unpac
     Ok(Unpacked {
         tree,
         last_modified,
+        stripped: None,
     })
 }
 
@@ -453,19 +586,19 @@ fn dos_time_to_unix(dt: &zip::DateTime, zone: &TimeZone) -> u64 {
 /// `TarballCache::dereferenceSingletonDirectory`: if the root holds
 /// exactly one entry and it is a directory, that directory becomes the
 /// root.
-pub fn dereference_singleton_directory(tree: &mut MemoryAccessor) {
+pub fn dereference_singleton_directory(tree: &mut MemoryAccessor) -> Option<Vec<u8>> {
     let singleton = match tree.root() {
-        Some(MemoryNode::Directory(entries)) if entries.len() == 1 => {
-            match entries.values().next() {
-                Some(MemoryNode::Directory(inner)) => Some(inner.clone()),
-                _ => None,
+        Some(MemoryNode::Directory(entries)) if entries.len() == 1 => match entries.iter().next() {
+            Some((name, MemoryNode::Directory(inner))) => {
+                Some((AsRef::<[u8]>::as_ref(name).to_vec(), inner.clone()))
             }
-        }
+            _ => None,
+        },
         _ => None,
     };
-    if let Some(inner) = singleton {
-        *tree = MemoryAccessor::from_root(MemoryNode::Directory(inner));
-    }
+    let (name, inner) = singleton?;
+    *tree = MemoryAccessor::from_root(MemoryNode::Directory(inner));
+    Some(name)
 }
 
 /// `TarballInputScheme::getAccessor`.
@@ -479,9 +612,21 @@ pub fn fetch_tarball(
     let parsed = check_local_tarball_path(&url, settings)?;
     // `downloadTarball_`'s activity, which covers the download too.
     (settings.info)(&format!("unpacking '{parsed}' into the Git cache..."));
-    let download = http.download(&url, &[], settings)?;
     let name_hint = parsed.path.last().map_or("", String::as_str);
-    let unpacked = unpack_archive(&download.data, name_hint, &*settings.warn)?;
+    let expected = input.nar_hash()?;
+    let DownloadedArchive {
+        download,
+        unpacked,
+        members,
+    } = download_archive(
+        http,
+        &url,
+        &[],
+        settings,
+        name_hint,
+        expected.as_ref(),
+        &|e| e,
+    )?;
 
     if let Some(immutable) = &download.immutable_url {
         let immutable_input = Input::from_url_str(settings, immutable, true)?;
@@ -504,8 +649,12 @@ pub fn fetch_tarball(
     input
         .attrs
         .insert("narHash".into(), Attr::String(nar_hash.to_sri()));
+    let accessor: Arc<dyn brix_store::SourceAccessor> = Arc::new(tree);
+    if let Some(members) = members {
+        members.finish(&nar_hash, unpacked.stripped.as_deref(), accessor.clone());
+    }
     Ok(FetchedTree {
-        accessor: Arc::new(tree),
+        accessor,
         input,
         verified: false,
     })
@@ -617,6 +766,122 @@ mod tests {
             builder.append_data(&mut header, name, *contents).unwrap();
         }
         builder.into_inner().unwrap()
+    }
+
+    /// The regular files an archive's members were shown as.
+    #[derive(Default)]
+    struct Seen(Vec<(Vec<u8>, Vec<u8>)>);
+
+    impl ArchiveMembers for Seen {
+        fn file(&mut self, path: &CanonPath, contents: &[u8]) {
+            self.0.push((path.rel().to_vec(), contents.to_vec()));
+        }
+
+        fn finish(
+            self: Box<Self>,
+            _: &NarHash,
+            _: Option<&[u8]>,
+            _: Arc<dyn brix_store::SourceAccessor>,
+        ) {
+        }
+    }
+
+    /// A reader that hands out one byte at a time, as a slow connection
+    /// might.
+    struct Trickle<'a>(&'a [u8]);
+
+    impl Read for Trickle<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.len().min(buf.len()).min(1);
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Ok(n)
+        }
+    }
+
+    fn gzip(data: &[u8]) -> Vec<u8> {
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(data).unwrap();
+        gz.finish().unwrap()
+    }
+
+    /// An archive unpacked as it arrives is the tree the whole archive
+    /// unpacks to, and its regular files are shown in the archive's order.
+    #[test]
+    fn streamed_unpacking_matches_buffered() {
+        let tar = make_tar(&[
+            ("pkg-1.0/", b"", 0o755, 100),
+            ("pkg-1.0/default.nix", b"import ./lib\n", 0o644, 200),
+            ("pkg-1.0/lib/default.nix", b"{ }\n", 0o644, 300),
+            ("pkg-1.0/bin/run", b"#!/bin/sh\n", 0o755, 150),
+            // A later member replaces an earlier one.
+            (
+                "pkg-1.0/default.nix",
+                b"import ./lib/default.nix\n",
+                0o644,
+                250,
+            ),
+        ]);
+        for (name, archive) in [("pkg.tar.gz", gzip(&tar)), ("pkg.tar", tar.clone())] {
+            let whole = unpack_archive(&archive, name, &no_warnings).unwrap();
+            for trickle in [false, true] {
+                let mut seen = Seen::default();
+                let streamed = if trickle {
+                    unpack_stream(&mut Trickle(&archive), name, &no_warnings, Some(&mut seen))
+                } else {
+                    unpack_stream(&mut &archive[..], name, &no_warnings, Some(&mut seen))
+                }
+                .expect("unpacks as it arrives");
+                assert_eq!(
+                    crate::fetch::tree_nar_hash(&streamed.tree).unwrap(),
+                    crate::fetch::tree_nar_hash(&whole.tree).unwrap()
+                );
+                assert_eq!(streamed.last_modified, whole.last_modified);
+                assert_eq!(streamed.stripped.as_deref(), Some(&b"pkg-1.0"[..]));
+                assert_eq!(whole.stripped.as_deref(), Some(&b"pkg-1.0"[..]));
+                let paths: Vec<&[u8]> = seen.0.iter().map(|(path, _)| &path[..]).collect();
+                assert_eq!(
+                    paths,
+                    [
+                        &b"pkg-1.0/default.nix"[..],
+                        b"pkg-1.0/lib/default.nix",
+                        b"pkg-1.0/bin/run",
+                        b"pkg-1.0/default.nix",
+                    ]
+                );
+                assert_eq!(seen.0[3].1, b"import ./lib/default.nix\n");
+            }
+        }
+    }
+
+    /// What cannot be unpacked as it arrives is left to `unpack_archive`,
+    /// which says what is wrong with it: a zip archive, a damaged one, and
+    /// one with damage after its end, which the tar reader never reads.
+    #[test]
+    fn streamed_unpacking_declines_what_the_whole_archive_decides() {
+        let tar = make_tar(&[("pkg-1.0/default.nix", b"1\n", 0o644, 100)]);
+        let gz = gzip(&tar);
+        let streams = |archive: &[u8], name: &str| {
+            unpack_stream(&mut &archive[..], name, &|_| {}, None).is_some()
+        };
+        assert!(streams(&gz, "pkg.tar.gz"));
+
+        let truncated = &gz[..gz.len() / 2];
+        assert!(!streams(truncated, "pkg.tar.gz"));
+        assert!(unpack_archive(truncated, "pkg.tar.gz", &|_| {}).is_err());
+
+        // A second gzip member that is cut short follows the archive.
+        let mut trailing = gz.clone();
+        trailing.extend_from_slice(&gz[..gz.len() - 4]);
+        assert!(!streams(&trailing, "pkg.tar.gz"));
+        assert!(unpack_archive(&trailing, "pkg.tar.gz", &|_| {}).is_err());
+
+        let zip = ZipBuilder::new()
+            .member(b"pkg/", b"", 0o40755, 0)
+            .member(b"pkg/default.nix", b"1\n", 0o100644, 0)
+            .finish();
+        assert!(!streams(&zip, "pkg.zip"));
+        assert!(unpack_archive(&zip, "pkg.zip", &|_| {}).is_ok());
     }
 
     #[test]

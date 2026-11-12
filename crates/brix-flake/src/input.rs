@@ -90,6 +90,19 @@ pub struct FetchSettings {
     /// prefix (Nix's `logError`), such as a failed `git fetch` into a
     /// clone that has an older version of the ref.
     pub error: Warn,
+    /// Who is shown the members of the archives a fetch downloads, as
+    /// they are unpacked (see [`crate::ArchiveObserver`]).
+    pub archive_observer: Option<ArchiveWatch>,
+}
+
+/// A [`crate::ArchiveObserver`] as a setting. Cheap to clone.
+#[derive(Clone)]
+pub struct ArchiveWatch(pub Arc<dyn crate::ArchiveObserver>);
+
+impl fmt::Debug for ArchiveWatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ArchiveWatch(..)")
+    }
 }
 
 impl Default for FetchSettings {
@@ -111,6 +124,7 @@ impl Default for FetchSettings {
             notice: Warn::new(|msg| eprintln!("{msg}")),
             info: Warn::new(|msg| eprintln!("{msg}")),
             error: Warn::new(|msg| eprintln!("error: {msg}")),
+            archive_observer: None,
         }
     }
 }

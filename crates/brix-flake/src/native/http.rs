@@ -19,6 +19,10 @@ use ureq::unversioned::transport::{
     ConnectionDetails, Connector, DefaultConnector, NextTimeout, Transport,
 };
 
+/// What reads a response body as it arrives (see
+/// [`HttpClient::download_streaming`]).
+pub type Consume<'a> = dyn FnMut(&mut dyn Read) + 'a;
+
 /// A downloaded resource.
 #[derive(Debug, Clone)]
 pub struct Download {
@@ -220,7 +224,27 @@ impl HttpClient {
                 immutable_url: None,
             });
         }
-        self.with_retries(url, headers, None, settings)
+        self.with_retries(url, headers, None, settings, None)
+    }
+
+    /// [`HttpClient::download`] of an HTTP(S) URL, showing `consume` the
+    /// body as it arrives: it is called once per attempt at the download
+    /// (an attempt that fails transiently is followed by another, from
+    /// the start) with a reader of that attempt's body. What `consume`
+    /// leaves unread is read all the same, so the download is whole
+    /// whatever it does. A `file://` URL is read at once and `consume` is
+    /// not called.
+    pub fn download_streaming(
+        &self,
+        url: &str,
+        headers: &[(String, String)],
+        settings: &FetchSettings,
+        consume: &mut Consume<'_>,
+    ) -> Result<Download> {
+        if url.starts_with("file:") {
+            return self.download(url, headers, settings);
+        }
+        self.with_retries(url, headers, None, settings, Some(consume))
     }
 
     /// POST `body` to `url` with extra `headers` (Nix's
@@ -242,7 +266,7 @@ impl HttpClient {
             return Err(err!("uploading to '{}' is not supported", url)
                 .trace(format!("during upload of '{url}'")));
         }
-        self.with_retries(url, headers, Some(body), settings)
+        self.with_retries(url, headers, Some(body), settings, None)
     }
 
     /// Transfers `url` (a POST of `body`, if given, else a GET), trying a
@@ -253,10 +277,11 @@ impl HttpClient {
         headers: &[(String, String)],
         body: Option<&[u8]>,
         settings: &FetchSettings,
+        mut consume: Option<&mut Consume<'_>>,
     ) -> Result<Download> {
         let mut attempt = 0;
         loop {
-            let failure = match self.attempt(url, headers, body, settings) {
+            let failure = match self.attempt(url, headers, body, settings, consume.as_deref_mut()) {
                 Ok(download) => return Ok(download),
                 Err(failure) => failure,
             };
@@ -284,6 +309,7 @@ impl HttpClient {
         headers: &[(String, String)],
         body: Option<&[u8]>,
         settings: &FetchSettings,
+        consume: Option<&mut Consume<'_>>,
     ) -> std::result::Result<Download, Failure> {
         // `FileTransferRequest::verb`.
         let verb = if body.is_some() { "upload" } else { "download" };
@@ -335,7 +361,7 @@ impl HttpClient {
         }
         let immutable_url = header("link").and_then(|link| parse_immutable_link(&link));
         let data = self
-            .read_body(url, verb, resp.body_mut())
+            .read_body(url, verb, resp.body_mut(), consume)
             .map_err(|error| Failure {
                 // The connection broke off: try again from the start.
                 transient: true,
@@ -377,11 +403,18 @@ impl HttpClient {
     /// Reads a response body, reporting the bytes received as Nix's
     /// `actFileTransfer` activity does: `downloading '…'` (`uploading
     /// '…'` for a POST, whose response this is), with progress against
-    /// `Content-Length` when the server sends one.
-    fn read_body(&self, url: &str, verb: &str, body: &mut ureq::Body) -> Result<Vec<u8>> {
+    /// `Content-Length` when the server sends one. `consume`, if given,
+    /// reads the body as it arrives; the rest is read after it returns.
+    fn read_body(
+        &self,
+        url: &str,
+        verb: &str,
+        body: &mut ureq::Body,
+        consume: Option<&mut Consume<'_>>,
+    ) -> Result<Vec<u8>> {
         // A body decoded on the fly (`Content-Encoding: gzip`) yields more
         // bytes than its length announces; the estimate grows with it.
-        let mut expected = body.content_length().unwrap_or(0);
+        let expected = body.content_length().unwrap_or(0);
         let activity = Activity::new(
             &*self.progress,
             ActivityKind::FileTransfer,
@@ -394,23 +427,63 @@ impl HttpClient {
                 }
             ),
         );
-        let mut reader = body.with_config().limit(u64::MAX).reader();
         // The announced length is only a hint for the first allocation.
-        let mut data = Vec::with_capacity(expected.min(64 << 20) as usize);
-        let mut chunk = vec![0u8; 256 * 1024];
-        loop {
-            let n = match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(err!("unable to {} '{}': {}", verb, url, e)),
-            };
-            data.extend_from_slice(&chunk[..n]);
-            let done = data.len() as u64;
-            expected = expected.max(done);
-            activity.update(done, expected);
+        let data = Vec::with_capacity(expected.min(64 << 20) as usize);
+        let mut body = BodyReader {
+            reader: body.with_config().limit(u64::MAX).reader(),
+            data,
+            expected,
+            activity: &activity,
+            failed: None,
+        };
+        if let Some(consume) = consume {
+            consume(&mut body);
         }
-        Ok(data)
+        // Whatever was not consumed.
+        let mut chunk = vec![0u8; 256 * 1024];
+        while matches!(body.read(&mut chunk), Ok(n) if n > 0) {}
+        match body.failed {
+            Some((_, e)) => Err(err!("unable to {} '{}': {}", verb, url, e)),
+            None => Ok(body.data),
+        }
+    }
+}
+
+/// A response body being read: what has arrived is kept (the download is
+/// the whole of it, whoever reads it), the transfer's activity told how
+/// far it is, and the error that ended it, if one did, remembered: it is
+/// the transfer's, whatever its reader makes of it.
+struct BodyReader<'a, R> {
+    reader: R,
+    data: Vec<u8>,
+    expected: u64,
+    activity: &'a Activity<'a>,
+    /// The error that ended the transfer, as its kind and its text.
+    failed: Option<(std::io::ErrorKind, String)>,
+}
+
+impl<R: Read> Read for BodyReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some((kind, text)) = &self.failed {
+            return Err(std::io::Error::new(*kind, text.clone()));
+        }
+        loop {
+            match self.reader.read(buf) {
+                Ok(0) => return Ok(0),
+                Ok(n) => {
+                    self.data.extend_from_slice(&buf[..n]);
+                    let done = self.data.len() as u64;
+                    self.expected = self.expected.max(done);
+                    self.activity.update(done, self.expected);
+                    return Ok(n);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    self.failed = Some((e.kind(), e.to_string()));
+                    return Err(e);
+                }
+            }
+        }
     }
 }
 
@@ -810,6 +883,26 @@ mod tests {
             "{warnings:?}"
         );
         assert!(warnings[1].ends_with(" ms (attempt 2/5)"), "{warnings:?}");
+    }
+
+    /// A body is shown to its consumer as it arrives, once per attempt
+    /// that gets a response, and is downloaded whole whatever the
+    /// consumer reads of it.
+    #[test]
+    fn a_body_is_consumed_as_it_arrives() {
+        let (url, seen) = serve(vec![(500, "", "no"), (200, "", "hello world")]);
+        let (client, _warnings) = client();
+        let mut consumed = Vec::new();
+        let download = client
+            .download_streaming(&url, &[], &quick_retries(5), &mut |body| {
+                let mut start = [0u8; 5];
+                body.read_exact(&mut start).unwrap();
+                consumed.push(start.to_vec());
+            })
+            .unwrap();
+        assert_eq!(download.data, b"hello world");
+        assert_eq!(consumed, [b"hello".to_vec()]);
+        assert_eq!(*seen.lock().unwrap(), 2);
     }
 
     #[test]

@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use brix_eval::image::format::{self as fmt, IR_FINGERPRINT_FIXTURE_HASH};
-use brix_eval::image::writer::{build_image, to_bytes, CompileOptions};
+use brix_eval::image::writer::{
+    build_image, compile_tree_with, to_bytes, CompileOptions, Precompiled,
+};
 use brix_eval::image::{
     compile_tree, format, Image, ImageAccessor, ImageCompileContext, ImageError,
 };
@@ -396,6 +398,52 @@ fn image_is_deterministic() {
     )
     .unwrap();
     assert_eq!(&a[..], &b[..]);
+}
+
+/// Modules compiled before the tree is at hand (as an archive's are while
+/// it downloads) are taken where the tree has that source at that path
+/// and nowhere else: the image is the one the tree compiles to.
+#[test]
+fn precompiled_modules_give_the_same_image() {
+    let dir = fixture();
+    let ctx = context();
+    let fs = FsAccessor::new(dir.path());
+    let options = CompileOptions::default();
+    let plain = compile_tree(&fs, &CanonPath::root(), &ctx, &options).unwrap();
+    let mut paths = Vec::new();
+    walk(&fs, &CanonPath::root(), &mut paths);
+    let modules: Vec<(Vec<u8>, Vec<u8>)> = paths
+        .iter()
+        .filter(|path| path.rel().ends_with(b".nix"))
+        .filter(|path| fs.lstat(path).unwrap().file_type == FileType::Regular)
+        .map(|path| (path.rel().to_vec(), fs.read_file(path).unwrap()))
+        .collect();
+    assert!(modules.len() > 3, "the fixture has modules");
+
+    // Every module, as the tree has it.
+    let mut all = Precompiled::new();
+    for (path, source) in &modules {
+        all.compile(path, source, &ctx);
+    }
+    assert_eq!(all.len(), modules.len());
+    let ahead = compile_tree_with(&fs, &CanonPath::root(), &ctx, &options, all).unwrap();
+    assert_eq!(&plain[..], &ahead[..]);
+
+    // Some of them, one from another source, one the tree does not have
+    // and one compiled for another path than the tree has it at.
+    let mut some = Precompiled::new();
+    for (i, (path, source)) in modules.iter().enumerate() {
+        match i % 3 {
+            0 => some.compile(path, source, &ctx),
+            1 => some.compile(path, b"{ stale = true; }", &ctx),
+            _ => {}
+        }
+    }
+    some.compile(b"not/in/the/tree.nix", b"1", &ctx);
+    let (first, second) = (&modules[0], &modules[1]);
+    some.compile(&second.0, &first.1, &ctx);
+    let mixed = compile_tree_with(&fs, &CanonPath::root(), &ctx, &options, some).unwrap();
+    assert_eq!(&plain[..], &mixed[..]);
 }
 
 /// The globals the fixture is compiled against for

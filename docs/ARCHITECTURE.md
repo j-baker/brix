@@ -527,8 +527,8 @@ The other `nix` commands (`repl`, `log`, `why-depends`, `profile`,
 command line (so `--help` and usage errors are its own), refuses the brix
 extension flags Nix would not know, and replaces itself with the `nix`
 binary named by `BRIX_DELEGATE_NIX`, given the original arguments. The
-package's wrapper sets that variable to the reference Nix, whose command
-line brix mirrors; without it these commands fail and say so. To agree
+package's wrapper sets that variable to nixpkgs' Nix (the module's to
+the Nix it wraps); without it these commands fail and say so. To agree
 with that `nix`, brix reads `nix.conf` as Nix does (system file, user
 files, `NIX_CONFIG`, then the command line, over `NIX_REMOTE` as the
 store's default; a setting under any of its aliases) for the settings
@@ -684,6 +684,24 @@ Implementation (`brix_eval::image`, `brix::compiled`):
   into place, and memory-mapped when used; an image the user names with
   `--compiled-input` is read whole instead, since brix does not own the
   file, and must open or the evaluation fails.
+- An input that is downloaded as an archive (a forge's `github:`,
+  `gitlab:` or `sourcehut:` archive, a `tarball` input) is compiled
+  while it downloads. The response body is decompressed and unpacked as
+  it arrives (`unpack_stream` in `brix-flake`'s `native/tarball.rs`;
+  zip archives, whose directory is at their end, and anything that goes
+  wrong are left to the unpacking of the whole download, which gives
+  Nix's errors), and the fetch shows each regular file to the session's
+  `brix_flake::ArchiveObserver`. That is `brix::compiled`'s
+  `StreamCompiler`: one thread per archive compiles the `.nix` files in
+  the archive's order, each as it arrives, and once the archive has
+  unpacked compiles the tree into the cache with those modules taken as
+  compiled (`Precompiled` in `brix_eval::image::writer`). A module
+  compiled ahead is used only where the tree has that source at that
+  path, so the image is byte for byte the one the tree compiles to. The
+  evaluator that asks for the tree's image waits for that thread and
+  opens the cache file; a session that ends waits for the images still
+  being written. A cold `github:NixOS/nixpkgs` evaluation has all 41,308
+  modules compiled by the time the download ends.
 - A bad cache file is replaced, at open or in use. One that does not
   open (another format version or fingerprint, a damaged preamble,
   header, archive or tree, the NAR hash of another tree) is compiled

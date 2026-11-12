@@ -7,6 +7,11 @@
 //! brix whose compiler output changed never picks up a stale file. Files
 //! are written to a temporary name and renamed into place; two brix
 //! processes compiling the same input race harmlessly.
+//!
+//! An input that is downloaded as an archive is compiled while it
+//! downloads ([`StreamCompiler`]): each `.nix` file as it is unpacked,
+//! one after the other in the archive's order, and the image itself once
+//! the tree is whole, off the thread that evaluates.
 
 #[cfg(brix_parallel)]
 use brix_eval::parallel_support::cell::RefCell;
@@ -14,11 +19,13 @@ use brix_eval::parallel_support::cell::RefCell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread::JoinHandle;
 use std::time::Instant;
 
-use brix_eval::image::writer::CompileOptions;
-use brix_eval::image::{compile_tree, Image, ImageCompileContext, ImageError};
+use brix_eval::image::writer::{compile_tree_with, CompileOptions, Precompiled};
+use brix_eval::image::{Image, ImageCompileContext, ImageError};
 use brix_eval::{FetchAttr, FetchedTree};
 use brix_flake::{Activity, ActivityKind, Progress, Waiting};
 use brix_store::{CanonPath, FileType, Hash, HashAlgo, HashFormat, SourceAccessor, StorePath};
@@ -62,6 +69,244 @@ pub(crate) struct ImageStore {
     /// [`brix_eval::Config::timings`]: say which images are used,
     /// compiled and replaced.
     timings: bool,
+    /// Compiling the inputs this session downloads, as they arrive.
+    stream: StreamCompiler,
+}
+
+/// Where the cache under `dir` keeps the image for a tree.
+fn image_cache_path(dir: &Path, nar_hash: &Hash, ctx: &ImageCompileContext) -> PathBuf {
+    dir.join(format!(
+        "{}-{}.brix",
+        nar_hash.to_string(HashFormat::Nix32, false),
+        &ctx.fingerprint_hex()[..16]
+    ))
+}
+
+/// Compiles the archives a session downloads into images while they
+/// download. A fetch shows it the members of an archive as it unpacks
+/// them ([`brix_flake::ArchiveObserver`]); one thread per archive compiles
+/// the `.nix` files among them, each as it arrives, and when the archive
+/// has unpacked into a tree, compiles that tree into the cache
+/// ([`compile_to`]) with those modules taken as compiled. The evaluator
+/// that then asks for the tree's image waits for that thread
+/// ([`StreamCompiler::wait`]) and finds the image in the cache.
+///
+/// Nothing here can change what an image holds: a module compiled ahead
+/// is used only where the tree has that source at that path.
+#[derive(Clone)]
+pub(crate) struct StreamCompiler(Arc<StreamShared>);
+
+struct StreamShared {
+    enabled: bool,
+    /// The image cache's directory.
+    dir: PathBuf,
+    min_nix_files: usize,
+    timings: bool,
+    /// What the session's evaluator compiles images with; fetches made
+    /// before it is known are not compiled ahead.
+    ctx: OnceLock<Arc<ImageCompileContext>>,
+    /// The trees being compiled, by `narHash` (nix32).
+    pending: Mutex<HashMap<String, JoinHandle<()>>>,
+}
+
+/// What a fetch tells the thread compiling its archive.
+enum Member {
+    /// A `.nix` file: its path in the archive and its contents.
+    File(Vec<u8>, Vec<u8>),
+    /// The archive unpacked.
+    Tree {
+        nar_hash: Hash,
+        stripped: Option<Vec<u8>>,
+        tree: Arc<dyn SourceAccessor>,
+    },
+}
+
+/// The members of one archive on their way to the thread that compiles
+/// them, which starts with the first `.nix` file.
+struct StreamMembers {
+    shared: Arc<StreamShared>,
+    ctx: Arc<ImageCompileContext>,
+    worker: Option<(Sender<Member>, JoinHandle<()>)>,
+}
+
+impl StreamCompiler {
+    fn new(enabled: bool, dir: PathBuf, min_nix_files: usize, timings: bool) -> StreamCompiler {
+        StreamCompiler(Arc::new(StreamShared {
+            enabled,
+            dir,
+            min_nix_files,
+            timings,
+            ctx: OnceLock::new(),
+            pending: Mutex::new(HashMap::new()),
+        }))
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, HashMap<String, JoinHandle<()>>> {
+        // A compiling thread that panicked holds no lock on this.
+        self.0
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether the tree with this hash is being compiled.
+    fn compiling(&self, nar_hash: &Hash) -> bool {
+        self.pending()
+            .contains_key(&nar_hash.to_string(HashFormat::Nix32, false))
+    }
+
+    /// Waits until the tree with this hash, if it is being compiled, has
+    /// been.
+    fn wait(&self, nar_hash: &Hash) {
+        let handle = self
+            .pending()
+            .remove(&nar_hash.to_string(HashFormat::Nix32, false));
+        if let Some(handle) = handle {
+            // A thread that panicked wrote no image: the caller compiles.
+            let _ = handle.join();
+        }
+    }
+
+    /// Waits for every tree being compiled.
+    fn wait_all(&self) {
+        let handles: Vec<JoinHandle<()>> = self.pending().drain().map(|(_, h)| h).collect();
+        for handle in handles {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl brix_flake::ArchiveObserver for StreamCompiler {
+    fn begin(
+        &self,
+        nar_hash: Option<&brix_flake::NarHash>,
+    ) -> Option<Box<dyn brix_flake::ArchiveMembers>> {
+        let shared = &self.0;
+        if !shared.enabled {
+            return None;
+        }
+        let ctx = shared.ctx.get()?.clone();
+        // A tree whose image the cache has needs none.
+        if let Some(nar_hash) = nar_hash {
+            if image_cache_path(&shared.dir, &store_hash(nar_hash), &ctx).exists() {
+                return None;
+            }
+        }
+        Some(Box::new(StreamMembers {
+            shared: shared.clone(),
+            ctx,
+            worker: None,
+        }))
+    }
+}
+
+impl brix_flake::ArchiveMembers for StreamMembers {
+    fn file(&mut self, path: &CanonPath, contents: &[u8]) {
+        let path = path.rel();
+        if !path.ends_with(b".nix") {
+            return;
+        }
+        let (members, _) = self.worker.get_or_insert_with(|| {
+            let (members, received) = channel();
+            let (shared, ctx) = (self.shared.clone(), self.ctx.clone());
+            let worker = std::thread::spawn(move || compile_stream(&shared, &ctx, received));
+            (members, worker)
+        });
+        // The thread has gone only if it panicked; the tree is then
+        // compiled when it is used.
+        let _ = members.send(Member::File(path.to_vec(), contents.to_vec()));
+    }
+
+    fn finish(
+        self: Box<Self>,
+        nar_hash: &brix_flake::NarHash,
+        stripped: Option<&[u8]>,
+        tree: Arc<dyn SourceAccessor>,
+    ) {
+        // An archive without a `.nix` file is not worth an image.
+        let Some((members, worker)) = self.worker else {
+            return;
+        };
+        let nar_hash = store_hash(nar_hash);
+        let key = nar_hash.to_string(HashFormat::Nix32, false);
+        let _ = members.send(Member::Tree {
+            nar_hash,
+            stripped: stripped.map(<[u8]>::to_vec),
+            tree,
+        });
+        let replaced = self
+            .shared
+            .pending
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, worker);
+        // The same tree, fetched twice: both write the same image.
+        drop(replaced);
+    }
+}
+
+/// The thread compiling one archive: its `.nix` files as they arrive, and
+/// then, if the archive unpacks, the tree it unpacked into.
+fn compile_stream(shared: &StreamShared, ctx: &ImageCompileContext, members: Receiver<Member>) {
+    let started = Instant::now();
+    let mut precompiled = Precompiled::new();
+    // A tree is the contents of its archive's top-level directory when
+    // that is the archive's only member (as in a forge's archives): the
+    // modules are compiled for the paths they have below it, and count
+    // only if that is how the archive turns out.
+    let mut top: Option<Vec<u8>> = None;
+    let mut one_top = true;
+    for member in members {
+        match member {
+            Member::File(path, contents) => {
+                if !one_top {
+                    continue;
+                }
+                let Some(slash) = path.iter().position(|&b| b == b'/') else {
+                    one_top = false;
+                    continue;
+                };
+                let (dir, rest) = (&path[..slash], &path[slash + 1..]);
+                match &top {
+                    None => top = Some(dir.to_vec()),
+                    Some(top) if top == dir => {}
+                    Some(_) => {
+                        one_top = false;
+                        continue;
+                    }
+                }
+                precompiled.compile(rest, &contents, ctx);
+            }
+            Member::Tree {
+                nar_hash,
+                stripped,
+                tree,
+            } => {
+                if !one_top || stripped.is_none() || stripped != top {
+                    precompiled = Precompiled::new();
+                }
+                if !worth_compiling(&*tree, shared.min_nix_files) {
+                    return;
+                }
+                let path = image_cache_path(&shared.dir, &nar_hash, ctx);
+                // Trouble here is not reported: the evaluation that uses
+                // the tree compiles it then, and says what is wrong.
+                let ahead = precompiled.len();
+                let compiled = compile_to(&*tree, ctx, &path, false, shared.timings, precompiled);
+                if let (true, Ok(info)) = (shared.timings, compiled) {
+                    eprintln!(
+                        "brix: compiled {} while it was fetched ({} modules, {ahead} of them \
+                         as they arrived, {} bytes) in {:?}",
+                        path.display(),
+                        info.modules,
+                        info.bytes,
+                        started.elapsed()
+                    );
+                }
+                return;
+            }
+        }
+    }
 }
 
 impl ImageStore {
@@ -82,13 +327,15 @@ impl ImageStore {
                 Err(_) => by_name.push((key.clone(), path.clone())),
             }
         }
+        let dir = config
+            .cache_dir
+            .clone()
+            .unwrap_or_else(|| default_cache_dir.to_path_buf())
+            .join("compiled");
         ImageStore {
             enabled: config.enabled,
-            dir: config
-                .cache_dir
-                .clone()
-                .unwrap_or_else(|| default_cache_dir.to_path_buf())
-                .join("compiled"),
+            stream: StreamCompiler::new(config.enabled, dir.clone(), config.min_nix_files, timings),
+            dir,
             explicit_by_hash: RefCell::new(by_hash),
             explicit_by_name: by_name,
             min_nix_files: config.min_nix_files,
@@ -118,11 +365,27 @@ impl ImageStore {
 
     /// Where the cache keeps the image for a tree.
     pub(crate) fn cache_path(&self, nar_hash: &Hash, ctx: &ImageCompileContext) -> PathBuf {
-        self.dir.join(format!(
-            "{}-{}.brix",
-            nar_hash.to_string(HashFormat::Nix32, false),
-            &ctx.fingerprint_hex()[..16]
-        ))
+        image_cache_path(&self.dir, nar_hash, ctx)
+    }
+
+    /// Who the session's fetches show the archives they download, so that
+    /// they are compiled as they arrive (see [`StreamCompiler`]).
+    pub(crate) fn archive_observer(&self) -> brix_flake::ArchiveWatch {
+        brix_flake::ArchiveWatch(Arc::new(self.stream.clone()))
+    }
+
+    /// What the session's evaluator compiles images with: known once the
+    /// evaluator is built, which is after the host is.
+    pub(crate) fn set_compile_context(&self, ctx: &ImageCompileContext) {
+        if self.enabled {
+            let _ = self.stream.0.ctx.set(Arc::new(ctx.clone()));
+        }
+    }
+
+    /// Waits for the images being compiled from this session's downloads,
+    /// so that none is abandoned half-written when the session ends.
+    pub(crate) fn finish_compiling(&self) {
+        self.stream.wait_all();
     }
 
     /// The image for a mounted tree: an explicit one (which must open,
@@ -188,6 +451,16 @@ impl ImageStore {
         nar_hash: &Hash,
     ) -> Option<Arc<Image>> {
         let path = self.cache_path(nar_hash, ctx);
+        // A tree this session downloaded may still be compiling.
+        if self.stream.compiling(nar_hash) {
+            let _waiting = Waiting::new(&*self.progress);
+            let _activity = Activity::new(
+                &*self.progress,
+                ActivityKind::Other,
+                &format!("compiling '{}'", tree.locked_url),
+            );
+            self.stream.wait(nar_hash);
+        }
         match open_image(&path, Load::Map, Some(&ctx.fingerprint), nar_hash) {
             Ok(img) => {
                 self.note(&format!(
@@ -217,7 +490,15 @@ impl ImageStore {
                 ActivityKind::Other,
                 &format!("compiling '{}'", tree.locked_url),
             );
-            compile_to(&*tree.accessor, ctx, &path, false, self.timings).and_then(|info| {
+            compile_to(
+                &*tree.accessor,
+                ctx,
+                &path,
+                false,
+                self.timings,
+                Precompiled::new(),
+            )
+            .and_then(|info| {
                 Ok((
                     info,
                     open_image(&path, Load::Map, Some(&ctx.fingerprint), nar_hash)?,
@@ -409,6 +690,7 @@ impl Session {
                 &path,
                 include_tree,
                 ctx.ev.services().config.timings,
+                Precompiled::new(),
             )?)
         })
     }
@@ -466,16 +748,18 @@ impl Session {
 }
 
 /// Compiles the tree on `accessor` into an image at `path` (atomically:
-/// temporary file, then rename).
+/// temporary file, then rename), taking the modules in `precompiled` as
+/// compiled.
 pub(crate) fn compile_to(
     accessor: &dyn SourceAccessor,
     ctx: &ImageCompileContext,
     path: &Path,
     include_tree: bool,
     notes: bool,
+    precompiled: Precompiled,
 ) -> std::result::Result<CompiledImage, ImageError> {
     let started = Instant::now();
-    let bytes = compile_tree(
+    let bytes = compile_tree_with(
         accessor,
         &CanonPath::root(),
         ctx,
@@ -484,6 +768,7 @@ pub(crate) fn compile_to(
             include_tree,
             notes,
         },
+        precompiled,
     )?;
     let (modules, nar_hash) = {
         let image = Image::open(bytes.clone(), Some(&ctx.fingerprint))?;
@@ -574,6 +859,83 @@ mod tests {
             brix_store::XpSettings::NONE,
             false,
         )
+    }
+
+    /// An archive's `.nix` files are compiled as a fetch shows them, and
+    /// the tree it unpacks to into the cache: the image is the one the
+    /// tree compiles to, whatever the archive held on the way.
+    #[test]
+    fn archives_are_compiled_as_they_arrive() {
+        use brix_flake::ArchiveObserver;
+        let tree_dir = tempfile::tempdir().unwrap();
+        let tree = fetched(tree_dir.path());
+        let ctx = context();
+        let (nar_hash, _) =
+            brix_store::nar::hash(&*tree.accessor, &CanonPath::root(), HashAlgo::Sha256).unwrap();
+        let flake_hash =
+            brix_flake::NarHash::from_bytes(nar_hash.as_bytes().try_into().expect("sha256"));
+
+        // What compiling the tree when it is used gives.
+        let plain_cache = tempfile::tempdir().unwrap();
+        let plain = store(plain_cache.path(), Vec::new());
+        plain.image_for(&tree, &ctx).unwrap().expect("compiled");
+        let plain = std::fs::read(plain.cache_path(&nar_hash, &ctx)).unwrap();
+
+        let path = |rel: &str| CanonPath::new(rel.as_bytes()).unwrap();
+        type Members<'a> = &'a [(&'a str, &'a str)];
+        let archives: [(&str, Members<'_>, Option<&[u8]>); 3] = [
+            (
+                "a forge's archive",
+                &[
+                    // Replaced by the next member at its path.
+                    ("top/default.nix", "{ replaced = true; }"),
+                    ("top/default.nix", "{ a = import ./b.nix; }\n"),
+                    ("top/b.nix", "rec { x = 1; y = x; }\n"),
+                    ("top/README", "not a module"),
+                ],
+                Some(b"top"),
+            ),
+            (
+                "members the tree does not have as they were",
+                &[("top/b.nix", "{ stale = true; }"), ("top/c.nix", "1")],
+                Some(b"top"),
+            ),
+            (
+                "an archive that is not one directory",
+                &[("default.nix", "1"), ("top/b.nix", "2")],
+                None,
+            ),
+        ];
+        for (what, members, stripped) in archives {
+            let cache = tempfile::tempdir().unwrap();
+            let images = store(cache.path(), Vec::new());
+            // Before the evaluator is known, nothing is compiled ahead.
+            assert!(images.stream.begin(Some(&flake_hash)).is_none(), "{what}");
+            images.set_compile_context(&ctx);
+            let mut archive = images.stream.begin(Some(&flake_hash)).expect("begins");
+            for (member, contents) in members {
+                archive.file(&path(member), contents.as_bytes());
+            }
+            archive.finish(&flake_hash, stripped, tree.accessor.clone());
+            assert!(images.stream.compiling(&nar_hash), "{what}");
+            let image = images.image_for(&tree, &ctx).unwrap().expect("compiled");
+            assert_eq!(image.module_count(), 2, "{what}");
+            assert!(!images.stream.compiling(&nar_hash), "{what}");
+            let streamed = std::fs::read(images.cache_path(&nar_hash, &ctx)).unwrap();
+            assert!(streamed == plain, "{what}: the image differs");
+            // The cache has the image now: the tree is not compiled again.
+            assert!(images.stream.begin(Some(&flake_hash)).is_none(), "{what}");
+        }
+
+        // A session that ends waits for what is being compiled.
+        let cache = tempfile::tempdir().unwrap();
+        let images = store(cache.path(), Vec::new());
+        images.set_compile_context(&ctx);
+        let mut archive = images.stream.begin(None).expect("begins");
+        archive.file(&path("top/b.nix"), b"rec { x = 1; y = x; }\n");
+        archive.finish(&flake_hash, Some(b"top"), tree.accessor.clone());
+        images.finish_compiling();
+        assert!(images.cache_path(&nar_hash, &ctx).exists());
     }
 
     /// A damaged or stale cache file is replaced by a fresh compile, never

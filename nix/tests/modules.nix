@@ -1,6 +1,12 @@
 # Small executable fixtures exercise packaging and delegation without rebuilding
 # the Rust workspace. The CLI's own delegation tests live in brix-cli/tests.
-{ pkgs }:
+{
+  pkgs,
+  # The brix this flake builds: NixOS validates the nix.conf it generates
+  # with the configured package's bin/nix, which only the real CLI can show
+  # to work.
+  realBrix,
+}:
 let
   inherit (pkgs) lib;
   fallback =
@@ -139,11 +145,15 @@ let
         system.stateVersion = "26.05";
         programs.brix = {
           enable = true;
+          package = realBrix;
           fallbackPackage = pkgs.nix;
         };
       }
     ];
   };
+  # Building it runs `nix config show` from the combined package on the
+  # generated file, and fails on any warning or error it prints.
+  nixConf = nixos.config.environment.etc."nix/nix.conf".source;
   profile = pkgs.buildEnv {
     name = "brix-module-profile";
     paths = system.environment.systemPackages;
@@ -155,6 +165,12 @@ assert combined.version == fallback.version;
 assert combined.out.version == fallback.version;
 assert combined.pname == fallback.pname;
 assert combined.fixtureMarker;
+assert
+  combined.outputs == [
+    "out"
+    "man"
+  ];
+assert lib.sort lib.lessThan realNix.outputs == lib.sort lib.lessThan pkgs.nix.outputs;
 assert nixos.config.nix.package == nixos.config.programs.brix.finalPackage;
 assert lib.elem nixos.config.nix.package nixos.config.environment.systemPackages;
 pkgs.runCommand "brix-module-tests" { } ''
@@ -186,6 +202,13 @@ pkgs.runCommand "brix-module-tests" { } ''
   test "$(cat ${combined}/libexec/helper)" = helper
   test "$(cat ${combined}/share/man/man1/nix.1)" = manual
   test "$(readlink -f ${combined}/bin/nix-store)" = ${fallback}/bin/nix
+  # The fallback's other outputs are the combined package's own.
+  test "$(cat ${combined.man}/share/man/man1/nix.1)" = manual
+  test "$(readlink ${combined.man})" = ${fallback.man}
+  test "$(readlink ${realNix.dev})" = ${pkgs.nix.dev}
+  test "$(readlink ${realNix.doc})" = ${pkgs.nix.doc}
+  test "$(readlink ${realNix.man})" = ${pkgs.nix.man}
+  test -s ${nixConf}
   # A real Nix binary checks argv[0], unlike the shell fixtures above.
   expectedVersion="$(${lib.getExe' pkgs.nix "nix"} --version)"
   test "$(BRIX_USE_NIX=1 ${realNix}/bin/nix --version)" = "$expectedVersion"

@@ -34,6 +34,36 @@ pub struct FetchedTree {
     pub verified: bool,
 }
 
+/// Watches the archives a fetch downloads, member by member, as they are
+/// unpacked: while the rest of the archive is still on its way. brix
+/// compiles a flake input's `.nix` files this way (see `brix::compiled`).
+/// [`FetchSettings::archive_observer`] names the one a fetch reports to.
+pub trait ArchiveObserver: Send + Sync {
+    /// An archive is about to be unpacked, into a tree whose NAR hash is
+    /// expected to be `nar_hash` (a locked input's). `None` declines it.
+    /// A download that is tried again begins again.
+    fn begin(&self, nar_hash: Option<&NarHash>) -> Option<Box<dyn ArchiveMembers>>;
+}
+
+/// The members of one archive, in the archive's order. Dropped without
+/// [`ArchiveMembers::finish`] when the archive does not unpack.
+pub trait ArchiveMembers {
+    /// A regular file, at its path in the archive. A later member at the
+    /// same path replaces it.
+    fn file(&mut self, path: &CanonPath, contents: &[u8]);
+
+    /// The archive unpacked into `tree`, whose NAR hash is `nar_hash`.
+    /// `stripped` is the name of the archive's single top-level
+    /// directory, when `tree` is that directory's contents
+    /// (`dereferenceSingletonDirectory`).
+    fn finish(
+        self: Box<Self>,
+        nar_hash: &NarHash,
+        stripped: Option<&[u8]>,
+        tree: Arc<dyn SourceAccessor>,
+    );
+}
+
 impl std::fmt::Debug for FetchedTree {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FetchedTree")

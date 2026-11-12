@@ -4,6 +4,8 @@
 //! SHA-256), hashes every directory as a NAR, parses and compiles every
 //! `.nix` file, and serialises the result. Parsing, compiling and
 //! hashing are independent per file or directory and run on all cores.
+//! Modules compiled before the tree was at hand ([`Precompiled`]: an
+//! archive's, as it downloads) are taken as they are.
 //!
 //! Each module is compiled with its own symbol table that starts out as
 //! a copy of the evaluator's base symbols, so the ids it produces are
@@ -59,6 +61,8 @@ struct Walk<'t> {
     /// to it.
     root: &'t CanonPath,
     blobs: Vec<Vec<u8>>,
+    /// The SHA-256 of each blob, which names it in `blob_index`.
+    blob_hashes: Vec<[u8; 32]>,
     blob_index: HashMap<[u8; 32], u32>,
     dirs: Vec<DirBuild>,
     /// `(path relative to root, blob)` of every `.nix` file; paths are
@@ -76,6 +80,7 @@ impl Walk<'_> {
         }
         let i = self.blobs.len() as u32;
         self.blobs.push(data);
+        self.blob_hashes.push(key);
         self.blob_index.insert(key, i);
         i
     }
@@ -423,6 +428,55 @@ fn compile_module(
     })
 }
 
+/// Modules compiled before their tree is at hand: as the members of an
+/// archive arrive, say, while the rest of it is still being downloaded.
+/// [`build_image_with`] takes from here every `.nix` file of the tree
+/// whose path and contents are what was compiled, and compiles the others
+/// itself, so the image is the one [`build_image`] makes of the tree
+/// whatever was (or was not) compiled ahead of it.
+#[derive(Default)]
+pub struct Precompiled {
+    /// By path relative to the tree's root, with the SHA-256 of the
+    /// source that was compiled.
+    modules: HashMap<Vec<u8>, ([u8; 32], Compiled)>,
+}
+
+impl Precompiled {
+    pub fn new() -> Precompiled {
+        Precompiled::default()
+    }
+
+    /// Compiles `source`, the contents of the file at `rel_path` (relative
+    /// to the root of the tree it will be part of). A later file at the
+    /// same path replaces an earlier one, as it does in an archive.
+    pub fn compile(&mut self, rel_path: &[u8], source: &[u8], ctx: &ImageCompileContext) {
+        // A file that cannot be compiled here is left to the tree's own
+        // compilation, which reports why.
+        if let Ok(compiled) = compile_module(rel_path, source, ctx) {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(Hash::of(HashAlgo::Sha256, source).as_bytes());
+            self.modules.insert(rel_path.to_vec(), (hash, compiled));
+        }
+    }
+
+    /// How many modules are held.
+    pub fn len(&self) -> usize {
+        self.modules.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty()
+    }
+
+    /// The module compiled for `rel_path` from a source with this hash.
+    fn take(&mut self, rel_path: &[u8], hash: &[u8; 32]) -> Option<Compiled> {
+        match self.modules.remove(rel_path) {
+            Some((compiled_from, compiled)) if compiled_from == *hash => Some(compiled),
+            _ => None,
+        }
+    }
+}
+
 /// Stores `data` as a blob: compressed when that helps.
 fn encode_blob(data: &[u8]) -> fmt::Blob {
     let raw_len = file_len(data);
@@ -452,7 +506,18 @@ pub fn compile_tree(
     ctx: &ImageCompileContext,
     options: &CompileOptions,
 ) -> Result<AlignedVec, ImageError> {
-    let image = build_image(accessor, root, ctx, options)?;
+    compile_tree_with(accessor, root, ctx, options, Precompiled::new())
+}
+
+/// [`compile_tree`], taking the modules in `precompiled` as compiled.
+pub fn compile_tree_with(
+    accessor: &dyn SourceAccessor,
+    root: &CanonPath,
+    ctx: &ImageCompileContext,
+    options: &CompileOptions,
+    precompiled: Precompiled,
+) -> Result<AlignedVec, ImageError> {
+    let image = build_image_with(accessor, root, ctx, options, precompiled)?;
     to_bytes(&image, &ctx.fingerprint)
 }
 
@@ -485,6 +550,18 @@ pub fn build_image(
     ctx: &ImageCompileContext,
     options: &CompileOptions,
 ) -> Result<fmt::Image, ImageError> {
+    build_image_with(accessor, root, ctx, options, Precompiled::new())
+}
+
+/// [`build_image`], taking the modules in `precompiled` as compiled.
+#[doc(hidden)]
+pub fn build_image_with(
+    accessor: &dyn SourceAccessor,
+    root: &CanonPath,
+    ctx: &ImageCompileContext,
+    options: &CompileOptions,
+    mut precompiled: Precompiled,
+) -> Result<fmt::Image, ImageError> {
     let threads = if options.threads == 0 {
         std::thread::available_parallelism().map_or(4, |n| n.get())
     } else {
@@ -506,21 +583,22 @@ pub fn build_image(
         accessor,
         root,
         blobs: vec![Vec::new()],
+        blob_hashes: Vec::new(),
         blob_index: HashMap::new(),
         dirs: Vec::new(),
         nix_files: Vec::new(),
     };
-    walk.blob_index.insert(
-        {
-            let mut k = [0u8; 32];
-            k.copy_from_slice(Hash::of(HashAlgo::Sha256, &[]).as_bytes());
-            k
-        },
-        0,
-    );
+    let empty = {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(Hash::of(HashAlgo::Sha256, &[]).as_bytes());
+        k
+    };
+    walk.blob_hashes.push(empty);
+    walk.blob_index.insert(empty, 0);
     walk.walk_dir(&CanonPath::root())?;
     let Walk {
         blobs,
+        blob_hashes,
         dirs,
         mut nix_files,
         ..
@@ -551,15 +629,29 @@ pub fn build_image(
     // Modules: compile in parallel, then pool the names and encode. The
     // name table is filled in module order (modules are sorted by path),
     // so the image does not depend on scheduling.
-    let compiled = parallel_map(nix_files.len(), threads, |i| {
-        let (path, blob) = &nix_files[i];
+    // What was compiled ahead of the tree is taken as it is; a module is
+    // a function of its path and its source alone.
+    let ahead: Vec<Option<Compiled>> = nix_files
+        .iter()
+        .map(|(path, blob)| precompiled.take(path, &blob_hashes[*blob as usize]))
+        .collect();
+    drop(precompiled);
+    let missing: Vec<usize> = (0..nix_files.len())
+        .filter(|&i| ahead[i].is_none())
+        .collect();
+    let compiled = parallel_map(missing.len(), threads, |i| {
+        let (path, blob) = &nix_files[missing[i]];
         compile_module(path, &blobs[*blob as usize], ctx)
     });
+    let mut compiled = compiled.into_iter();
     let mut names = fmt::StringTable::default();
     let mut name_index: HashMap<Vec<u8>, u32> = HashMap::new();
-    let mut compiled_ok = Vec::with_capacity(compiled.len());
-    for c in compiled {
-        compiled_ok.push(c?);
+    let mut compiled_ok = Vec::with_capacity(nix_files.len());
+    for c in ahead {
+        compiled_ok.push(match c {
+            Some(c) => c,
+            None => compiled.next().expect("one result per missing module")?,
+        });
     }
     let indices: Vec<Vec<u32>> = compiled_ok
         .iter()

@@ -14,6 +14,14 @@ let
     export BRIX_DELEGATE_NIX=${originalNix}
     exec ${lib.getExe' brix "brix"} "$@"
   '';
+  # The fallback's other outputs (`dev`, `doc`, `man`, …) are this
+  # package's too, so that `nix.package.dev` is still Nix's headers. `out`
+  # is the joined tree below, and a `bin` output is part of it: forwarding
+  # that one would hand `lib.getBin` the original bin/nix.
+  forwardedOutputs = lib.subtractLists [
+    "out"
+    "bin"
+  ] (fallbackPackage.outputs or [ ]);
 in
 symlinkJoin {
   name = "${fallbackPackage.name}-with-brix";
@@ -28,7 +36,11 @@ symlinkJoin {
       fallbackPackage.meta.outputsToInstall or [ "out" ]
     )
   );
+  outputs = [ "out" ] ++ forwardedOutputs;
   postBuild = ''
+    ${lib.concatMapStrings (output: ''
+      ln -sT ${fallbackPackage.${output}} "''$${output}"
+    '') forwardedOutputs}
     # lndir preserves relative symlinks. Anchor every original bin entry to
     # its source so aliases such as nix-store -> nix keep running real Nix.
     for executable in ${lib.getBin fallbackPackage}/bin/*; do

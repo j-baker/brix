@@ -42,6 +42,12 @@
           overlays = [
             nix-claude-code.overlays.default
             llm-agents.overlays.shared-nixpkgs
+	    # Todo delete when on 26.11.
+            (_final: prev: {
+              tzdata = prev.tzdata.overrideAttrs {
+                checkTarget = "check_mild back.ck";
+              };
+            })
           ];
         };
       # The `nix` binary of the reference Nix: the oracle of the differential
@@ -133,6 +139,7 @@
           pgo-bolt = self.packages.${system}.brix-pgo-bolt;
           inherit (built) tests;
           modules = import ./nix/tests/modules.nix { pkgs = pkgsFor system; };
+          devShell = self.devShells.${system}.default;
         }
       );
 

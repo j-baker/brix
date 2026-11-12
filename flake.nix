@@ -3,8 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
-    nix-claude-code.url = "github:ryoppippi/nix-claude-code";
-    nix-claude-code.inputs.nixpkgs.follows = "nixpkgs";
     crate2nix.url = "github:nix-community/crate2nix";
     crate2nix.inputs.nixpkgs.follows = "nixpkgs";
     # The Nix brix is compatible with: Determinate Nix, pinned to a release
@@ -22,7 +20,6 @@
     {
       self,
       nixpkgs,
-      nix-claude-code,
       crate2nix,
       nix-src,
       llm-agents,
@@ -40,7 +37,6 @@
           inherit system;
           config.allowUnfree = true;
           overlays = [
-            nix-claude-code.overlays.default
             llm-agents.overlays.shared-nixpkgs
 	    # Todo delete when on 26.11.
             (_final: prev: {
@@ -207,7 +203,7 @@
                   mkdir -p $out/bin
                   ln -s ${openssh}/bin/ssh-keygen $out/bin/ssh-keygen
                 '')
-                claude-code
+                pkgs.llm-agents.claude-code
                 pkgs.llm-agents.codex
                 # Regenerates the committed Cargo.nix after dependency
                 # changes: `crate2nix generate`.

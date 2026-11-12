@@ -334,26 +334,6 @@
         "type": "github"
       }
     },
-    "nix-claude-code": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1794276105,
-        "narHash": "sha256-cMX3gaJniHZRY5IKwzLILsK2NY6AvSii6AYR6edztqw=",
-        "owner": "ryoppippi",
-        "repo": "nix-claude-code",
-        "rev": "b9a885d733483cffff8877e7816123c5f0509452",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ryoppippi",
-        "repo": "nix-claude-code",
-        "type": "github"
-      }
-    },
     "nix-src": {
       "inputs": {
         "bdwgc": "bdwgc",
@@ -502,7 +482,6 @@
       "inputs": {
         "crate2nix": "crate2nix",
         "llm-agents": "llm-agents",
-        "nix-claude-code": "nix-claude-code",
         "nix-src": "nix-src",
         "nixpkgs": "nixpkgs_3"
       }

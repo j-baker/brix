@@ -79,7 +79,7 @@ for where brix knowingly differs from Nix.
 
 This is really a sidestep rather than a feature. As mentioned, on an appropriately 'defended' enterprise system 
 it's not uncommon for pulling a new nixpkgs version to take 5-15 minutes. This time is sidestepped through the architecture
-of 
+of Brix, due to it reading and writing from many fewer files. 
 
 ### Significant performance improvements over Nix (and Determinate Nix) on practical systems
 

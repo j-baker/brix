@@ -1,0 +1,28 @@
+[package]
+name = "brix-alloc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The allocator setup for brix binaries: mimalloc under an arena pre-faulting wrapper"
+build = "build.rs"
+
+[dependencies]
+# Transparent huge pages are off: with the kernel's default
+# `defrag=madvise` they make faults stall on compaction once free memory
+# is fragmented (a NixOS evaluation went from 2.1 s to 3.0 s), while the
+# pre-faulting wrapper gets the same fault reduction predictably.
+mimalloc = { version = "0.1", features = ["no_thp"] }
+# The C library mimalloc wraps, named directly so that its headers reach
+# this crate's build script (`DEP_MIMALLOC_INCLUDE_DIR`) for `tune.c`.
+libmimalloc-sys = "0.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+memmap2.workspace = true
+rustix = { workspace = true, features = ["param"] }
+
+[build-dependencies]
+# mimalloc itself is built with `cc`, so this adds no toolchain requirement.
+cc = "1"

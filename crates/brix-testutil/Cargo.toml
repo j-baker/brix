@@ -1,0 +1,14 @@
+[package]
+name = "brix-testutil"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test support shared by brix's crates: the test environment, the reference nix as an oracle, Git repositories"
+publish = false
+
+# No brix crate: every member, brix-syntax and brix-store included, can
+# take this as a dev-dependency.
+[dependencies]
+tempfile.workspace = true

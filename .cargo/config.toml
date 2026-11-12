@@ -1,0 +1,6 @@
+# brix-gc counts bitmap words with POPCNT in its tracing loop and refuses to
+# build for x86-64 without it. RUSTFLAGS in the environment replaces these
+# flags, so anything that sets it (scripts/pgo-build.sh, nix/pgo-bolt.nix)
+# passes the feature itself; the crate2nix build takes it from flake.nix.
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+popcnt"]

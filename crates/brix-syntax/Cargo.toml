@@ -1,0 +1,24 @@
+[package]
+name = "brix-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Lexer and parser for the Nix expression language, bug-for-bug compatible with Nix"
+
+[dependencies]
+bstr.workspace = true
+logos = "0.16"
+hashbrown.workspace = true
+stacker.workspace = true
+hipstr.workspace = true
+
+[dev-dependencies]
+brix-testutil.workspace = true
+criterion.workspace = true
+walkdir = "2"
+
+[[bench]]
+name = "parse"
+harness = false

@@ -1,0 +1,20 @@
+[package]
+name = "brix-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client for the Nix daemon worker protocol: builds and store reads for brix's evaluator"
+
+[dependencies]
+brix-store.workspace = true
+# Output names, which are bytes on the wire as in Nix.
+bstr.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+# The private directory holding an ssh-ng store's pinned host key.
+tempfile.workspace = true
+
+[dev-dependencies]
+brix-testutil.workspace = true

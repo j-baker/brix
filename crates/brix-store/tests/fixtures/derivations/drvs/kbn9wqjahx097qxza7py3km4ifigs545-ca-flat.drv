@@ -1,0 +1,1 @@
+Derive([("out","","sha512","")],[],[],"x86_64-linux","/bin/sh",[],[("builder","/bin/sh"),("name","ca-flat"),("out","/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9"),("outputHashAlgo","sha512"),("outputHashMode","flat"),("system","x86_64-linux")])

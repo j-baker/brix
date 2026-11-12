@@ -1,0 +1,35 @@
+[package]
+name = "brix-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Nix store primitives for brix: hashes, store paths, derivations, NAR and the virtual store"
+
+[features]
+default = ["std-fs"]
+# A SourceAccessor over the real file system. Off for wasm targets.
+std-fs = ["dep:rustix"]
+
+[dependencies]
+bstr.workspace = true
+thiserror.workspace = true
+
+blake3 = "1"
+digest = "0.10"
+md-5 = "0.10"
+sha1 = "0.10"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+# `O_NOFOLLOW` for opening files without following a final symlink.
+libc.workspace = true
+# Listing a directory through a descriptor opened without following a
+# final symlink (the `std-fs` accessor).
+rustix = { workspace = true, optional = true }
+
+[dev-dependencies]
+brix-testutil.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

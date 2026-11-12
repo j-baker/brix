@@ -1,0 +1,76 @@
+[package]
+name = "brix-eval-parallel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The Nix evaluator: compiler, values, evaluation, builtins and printers"
+
+[lib]
+# Not `brix_eval`: two libraries of one name collide in the target
+# directory. Dependents rename the package to `brix-eval` and so still
+# import `brix_eval`.
+name = "brix_eval_parallel"
+path = "../brix-eval/src/lib.rs"
+test = true
+doctest = false
+
+[dependencies]
+crossbeam-utils = "0.8"
+parking_lot = "0.12"
+thread_local = "1"
+rayon = "1"
+brix-syntax.workspace = true
+brix-store.workspace = true
+brix-gc.workspace = true
+bstr.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+bumpalo = "3"
+stacker.workspace = true
+regex.workspace = true
+toml = "0.8"
+hashbrown.workspace = true
+unicode-width = "0.2"
+smallvec = "1"
+# Compiled flake-input images: zero-copy loadable archives of the IR.
+rkyv = "0.8"
+self_cell.workspace = true
+# File contents inside full-tree images are deflate streams.
+flate2.workspace = true
+# Image checksums, verified as each part of an image is first used.
+xxhash-rust.workspace = true
+# In-process CPU profiling for the `profile` example (`--features profiling`):
+# perf_event_open is not available everywhere brix is developed.
+pprof = { version = "0.15", features = ["flamegraph"], optional = true }
+
+[features]
+# Per-operation work counters and histograms for BRIX_TIMINGS (thunks,
+# environments, calls, attribute sets). Off by default: updating them on
+# every operation cost 2-4% of a nixpkgs evaluation. Phase timings and
+# per-file counters are always collected.
+work-counters = []
+profiling = ["dep:pprof", "work-counters"]
+
+[dev-dependencies]
+brix-eval-serial = { package = "brix-eval", path = "../brix-eval" }
+# The tests, benchmarks and examples read sources from the file system.
+brix-store = { workspace = true, features = ["std-fs"] }
+brix-testutil.workspace = true
+# Formats `lastModifiedDate` in the tests' fetch host.
+jiff.workspace = true
+criterion.workspace = true
+# The measurement examples install the same allocator as the brix binary.
+brix-alloc.workspace = true
+tempfile.workspace = true
+# Random numbers for the fuzz generator and the bindings tests: PCG, whose
+# output for a seed is fixed (rand's StdRng may change between rand
+# versions).
+rand = "0.10"
+rand_pcg = "0.10"
+rustix = { workspace = true, features = ["process"] }
+
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(brix_parallel)"] }

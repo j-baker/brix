@@ -1,0 +1,66 @@
+[package]
+name = "brix-flake"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Flake references, lock files and input fetching for brix"
+
+[features]
+default = ["native"]
+# Fetchers that need the network, the file system or a git implementation.
+# Without this feature the crate is pure data and compiles for wasm.
+native = [
+  "dep:ureq",
+  "dep:tar",
+  "dep:flate2",
+  "dep:xz2",
+  "dep:bzip2",
+  "dep:zstd",
+  "dep:zip",
+  "dep:gix",
+  "dep:gix-transport",
+  "dep:jiff",
+  "dep:rustix",
+  "dep:tempfile",
+  "brix-store/std-fs",
+]
+
+[dependencies]
+brix-store.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex.workspace = true
+# `flock`, for the locks brix processes sharing a cache take (Nix's PathLocks),
+# without unsafe code.
+rustix = { workspace = true, optional = true }
+# The allowed-signers file `git verify-commit` reads, and its output
+# (`native/git_verify.rs`); the directory `hg archive` writes a revision to
+# (`native/mercurial.rs`); a Git LFS object on its way into the cache
+# (`native/git_lfs.rs`).
+tempfile = { workspace = true, optional = true }
+
+# `~3.5`: native/http.rs uses ureq's semver-exempt `unversioned` resolver and
+# connector API (a budget shared by name lookup and connect, as curl's).
+ureq = { version = "~3.5", optional = true, default-features = false, features = ["rustls", "gzip"] }
+tar = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+xz2 = { version = "0.1", optional = true }
+bzip2 = { version = "0.6", optional = true }
+zstd = { version = "0.13", optional = true }
+zip = { version = "4", optional = true, default-features = false, features = ["deflate"] }
+gix = { version = "0.74", optional = true, default-features = false, features = ["blocking-network-client", "revision", "status"] }
+# gix's HTTP transport without a backend of its own: Git over HTTP(S)
+# runs on brix's HTTP client (`native/git_http.rs`), so neither curl nor
+# reqwest (and its tokio and hyper) is built. The version is the one gix
+# depends on.
+gix-transport = { version = "0.49", optional = true, default-features = false, features = ["http-client"] }
+# The system time zone, for the local times zip archives hold.
+jiff = { workspace = true, optional = true, features = ["tz-system", "tzdb-zoneinfo"] }
+
+[dev-dependencies]
+brix-testutil.workspace = true
+rustls.workspace = true
+tempfile.workspace = true

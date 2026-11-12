@@ -1,0 +1,44 @@
+[package]
+name = "brix-parallel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A bug-for-bug compatible Nix evaluator: the library facade"
+
+[lib]
+# Not `brix`: two libraries of one name collide in the target directory.
+# Dependents rename the package to `brix` and so still import `brix`.
+name = "brix_parallel"
+path = "../brix/src/lib.rs"
+test = false
+doctest = false
+
+[dependencies]
+brix-syntax.workspace = true
+# The real file system (`FsAccessor`): local flakes, the store directory.
+brix-store = { workspace = true, features = ["std-fs"] }
+brix-eval = { package = "brix-eval-parallel", path = "../brix-eval-parallel" }
+# The fetchers. A host without them (wasm, say) builds on brix-eval and
+# brix-flake directly, with its own `brix_eval::Host`.
+brix-flake = { workspace = true, features = ["native"] }
+brix-daemon.workspace = true
+# Compiled flake-input images are memory-mapped from the cache.
+memmap2.workspace = true
+self_cell.workspace = true
+# The thread pool inputs are fetched on in the background (`fetching.rs`).
+rayon = "1"
+serde_json.workspace = true
+bstr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+brix-testutil.workspace = true
+tempfile.workspace = true
+# Tarballs for the parallel-fetch tests.
+tar.workspace = true
+flate2.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(brix_parallel)"] }

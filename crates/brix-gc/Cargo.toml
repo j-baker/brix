@@ -1,0 +1,13 @@
+[package]
+name = "brix-gc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Precise single-threaded generational collector"
+
+[features]
+# Diagnostic counters in the pointer-tracing hot path; absent in normal builds.
+trace-counts = []

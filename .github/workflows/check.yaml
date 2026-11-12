@@ -1,0 +1,37 @@
+name: Run checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    name: Nix checks
+    runs-on: trustless-amd64-large
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: actions/checkout@v4
+      - uses: j-baker/build-action@v0.4.0
+        with:
+          ssh-host: dev.trustless.build
+          org-slug: local-test
+          versioned-packages: brix
+          command: nix build .#checks.x86_64-linux.canBuild .#checks.x86_64-linux.tests .#checks.x86_64-linux.pgo-bolt
+      # Nix and Rust formatting (treefmt runs nixfmt and rustfmt).
+      - run: nix fmt -- --ci
+      - name: Clippy
+        run: nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # brix-syntax, brix-store, brix-eval and brix-flake (without its
+      # fetchers) build for wasm32-unknown-unknown and call nothing that
+      # panics there; the devshell's rustc has that target's std.
+      - name: Wasm-clean crates
+        run: nix develop -c scripts/check-wasm.sh
+      # The committed Cargo.nix must be what crate2nix makes of Cargo.lock.
+      - name: Cargo.nix is up to date
+        run: nix develop -c crate2nix generate && git diff --exit-code Cargo.nix
+      # Every test, including the ones that talk to a Nix daemon and write
+      # to its store: the determinate-nix-action above installs a daemon.
+      - name: All tests
+        run: nix develop -c scripts/test-all.sh

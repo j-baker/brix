@@ -1,0 +1,1 @@
+Derive([("out","/nix/store/3hy73cybs8lb9nms08qgkin3knlmvali-fixed-sha1","sha1","a9993e364706816aba3e25717850c26c9cd0d89d")],[],[],"x86_64-linux","/bin/sh",[],[("builder","/bin/sh"),("name","fixed-sha1"),("out","/nix/store/3hy73cybs8lb9nms08qgkin3knlmvali-fixed-sha1"),("outputHash","a9993e364706816aba3e25717850c26c9cd0d89d"),("outputHashAlgo","sha1"),("system","x86_64-linux")])

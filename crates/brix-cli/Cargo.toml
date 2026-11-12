@@ -1,0 +1,38 @@
+[package]
+name = "brix-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The brix command line: the nix CLI, evaluated by brix and built by a Nix daemon"
+
+[[bin]]
+name = "brix"
+path = "src/main.rs"
+
+[dependencies]
+brix-cli-parallel = { path = "../brix-cli-parallel" }
+brix.workspace = true
+brix-alloc.workspace = true
+brix-daemon.workspace = true
+brix-syntax.workspace = true
+brix-flake = { workspace = true, features = ["native"] }
+brix-store = { workspace = true, features = ["std-fs"] }
+serde.workspace = true
+serde_json.workspace = true
+bstr.workspace = true
+regex.workspace = true
+libc.workspace = true
+rustix = { workspace = true, features = ["termios"] }
+# Safe interface enumeration and process execution; personality setters on Linux.
+nix = { version = "0.31", default-features = false, features = ["net", "process", "personality"] }
+tempfile.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+brix-testutil.workspace = true
+rustls.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(brix_parallel)"] }

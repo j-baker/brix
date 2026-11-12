@@ -1,0 +1,18 @@
+# Clippy's configuration for scripts/check-wasm.sh only (it points
+# CLIPPY_CONF_DIR here): what the crates checked for
+# wasm32-unknown-unknown must not call. The target has no clock and no
+# threads, so these panic there; crate::platform in brix-eval is the one
+# place that decides what to do instead. Environment variables are
+# settings, which reach these crates through their configuration.
+disallowed-methods = [
+  { path = "std::time::Instant::now", reason = "panics on wasm32-unknown-unknown; use brix-eval's platform::Instant" },
+  { path = "std::time::SystemTime::now", reason = "panics on wasm32-unknown-unknown" },
+  { path = "std::thread::spawn", reason = "panics on wasm32-unknown-unknown; check platform::HAS_THREADS" },
+  { path = "std::thread::Builder::spawn", reason = "fails on wasm32-unknown-unknown; check platform::HAS_THREADS" },
+  { path = "std::thread::Builder::spawn_scoped", reason = "fails on wasm32-unknown-unknown; check platform::HAS_THREADS" },
+  { path = "std::thread::Scope::spawn", reason = "panics on wasm32-unknown-unknown; check platform::HAS_THREADS" },
+  { path = "std::thread::sleep", reason = "panics on wasm32-unknown-unknown" },
+  { path = "std::env::var", reason = "settings come from the caller's configuration" },
+  { path = "std::env::var_os", reason = "settings come from the caller's configuration" },
+  { path = "std::env::vars", reason = "settings come from the caller's configuration" },
+]

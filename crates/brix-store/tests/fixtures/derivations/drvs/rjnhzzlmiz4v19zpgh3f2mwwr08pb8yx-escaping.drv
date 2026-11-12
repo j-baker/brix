@@ -1,0 +1,1 @@
+Derive([("out","/nix/store/acpbwmhyazzd467sap1mmy0q4mvx1hfz-escaping","","")],[],[],"x86_64-linux","/bin/sh",["quote\"d","back\\slash","new\nline","tab\tchar","cr\rhere","ünïcödé ☃","$dollar"],[("WEIRD","a\"b\\c\nd\te\rf ☃ ${x}"),("builder","/bin/sh"),("name","escaping"),("out","/nix/store/acpbwmhyazzd467sap1mmy0q4mvx1hfz-escaping"),("system","x86_64-linux")])

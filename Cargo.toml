@@ -1,0 +1,86 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/brix-syntax",
+  "crates/brix-store",
+  "crates/brix-eval",
+  "crates/brix-eval-parallel",
+  "crates/brix-flake",
+  "crates/brix-daemon",
+  "crates/brix-alloc",
+  "crates/brix-gc",
+  "crates/brix",
+  "crates/brix-parallel",
+  "crates/brix-cli",
+  "crates/brix-cli-parallel",
+  "crates/brix-testutil",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "LGPL-2.1-or-later"
+repository = "https://github.com/j-baker/brix"
+
+# Versions for crates that several workspace members share. A crate that is
+# only used by one member is declared in that member's own Cargo.toml.
+[workspace.dependencies]
+# Test-only TLS servers (brix-flake, brix-cli).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+brix-syntax = { path = "crates/brix-syntax" }
+# The I/O parts of brix-store (the `std-fs` accessor) and brix-flake (the
+# `native` fetchers) are off unless a member asks for them, so that
+# brix-eval, and brix-flake without `native`, build for wasm (see
+# docs/ARCHITECTURE.md).
+brix-store = { path = "crates/brix-store", default-features = false }
+brix-eval = { path = "crates/brix-eval" }
+brix-gc = { path = "crates/brix-gc" }
+brix-flake = { path = "crates/brix-flake", default-features = false }
+brix-daemon = { path = "crates/brix-daemon" }
+brix-alloc = { path = "crates/brix-alloc" }
+brix = { path = "crates/brix" }
+brix-testutil = { path = "crates/brix-testutil" }
+
+bstr = "1"
+criterion = "0.8"
+# Deflate with zlib-rs (pure Rust, so the image loader builds for wasm).
+# ureq's `gzip` feature asks for flate2's default features, which compiles
+# miniz_oxide in as well, but flate2 uses zlib-rs whenever both are on.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+hashbrown = "0.15"
+# Small byte strings for syntax names: inline up to 23 bytes, shared beyond.
+hipstr = "0.8"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+libc = "0.2"
+memmap2 = "0.9"
+regex = "1"
+# Safe OS calls: descriptor-based directory listing and file locks.
+# Callers enable additional features for terminals, page sizes and limits.
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+self_cell = "1"
+serde = { version = "1", features = ["derive"] }
+# The features the brix binary is built with, declared here so that every
+# member is tested with them too (features unify across the binary's
+# dependency graph, but `cargo test -p <crate>` builds only that crate's):
+# objects keep their insertion order (`preserve_order`), numbers keep their
+# text (`arbitrary_precision`, for builtins.fromJSON), and nesting is not
+# limited to 128 levels (`unbounded_depth`).
+serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision", "unbounded_depth"] }
+stacker = "0.1"
+tar = "0.4"
+tempfile = "3"
+thiserror = "2"
+# Checksums of compiled-input images (XXH3: fast, no_std, builds for wasm).
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[profile.release]
+# Fat rather than thin: measured 12-30% faster evaluation (firefox.drvPath
+# 875 -> 613 ms through the CLI) and an 8% smaller binary, for about three
+# minutes of link time on a release build.
+lto = "fat"
+codegen-units = 1
+debug = 1
+
+[profile.bench]
+inherits = "release"

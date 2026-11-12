@@ -1,7 +1,10 @@
 # brix
 
-A bug-for-bug compatible implementation of the Nix language and evaluator, written in Rust.
+A bug-for-bug compatible implementation of the Nix language and evaluator, written in Rust. Largely only works on flakes.
 Brix is designed to be compatible with Nix up to being a drop-in replacement. Every line of the repository except the readme was written by LLMs, guided by humans (Claude Fable 5.1, 5.2, Claude Opus 5.5, and GPT 6 Astra).
+Brix replaces most of Nix's 'user land', the binary that runs when you run `nix flake check` or similar. It doesn't
+replace any of the Nix daemon (which runs in the background and is the part which sandboxes builds, manages the Nix
+store, et cetera).
 
 ## Motivations
 
@@ -84,12 +87,12 @@ We've tried to be very careful with performance related tradeoffs and this pays 
 faster than Nix across almost all codepaths. In the below table, values are expressed as (wall clock time/CPU time). What I
 take away is that in most cases you should expect a significant performance improvement from using Brix.
 
-| Benchmark                                              | Nix          | Lix          | Determinate Nix (serial) | Determinate Nix (parallel) | Brix (serial)  | Brix (parallel) |
-|--------------------------------------------------------|--------------|--------------|--------------------------|----------------------------|----------------|-----------------|
-| Developer's NixOS configuration                        | 9.071/15.57  | 8.219/14.44  | 10.472/9.76              | 6.802/14.08                | 4.982/*5.13*   | *4.847*/7.35    |
-| `nix flake check --no-build` on Nix                    | 21.882/32.49 | 41.774/46.47 | 4.147/3.86               | *1.193*/8.32               | 1.801/*1.98*   | 1.279/3.29      |
-| `nix flake show` on Nix                                | 2.602/2.43   | 2.032/6.15   | 2.493/2.41               | 1.112/5.42                 | 1.091/1.22     | *1.073/1.21*    |
-| `nix flake check --no-build` on large personal project | unknown      | unknown      | 57.720/69.37             | 36.681/117.51              | 35.318/*57.64* | *17.157*/99.63  |
+| Benchmark                                              | Nix          | Lix          | Determinate Nix (serial) | Determinate Nix (parallel) | Brix (serial)    | Brix (parallel)  |
+|--------------------------------------------------------|--------------|--------------|--------------------------|----------------------------|------------------|------------------|
+| Developer's NixOS configuration                        | 9.071/15.57  | 8.219/14.44  | 10.472/9.76              | 6.802/14.08                | 4.982/**5.13**   | **4.847**/7.35   |
+| `nix flake check --no-build` on Nix                    | 21.882/32.49 | 41.774/46.47 | 4.147/3.86               | **1.193**/8.32             | 1.801/**1.98**   | 1.279/3.29       |
+| `nix flake show` on Nix                                | 2.602/2.43   | 2.032/6.15   | 2.493/2.41               | 1.112/5.42                 | 1.091/1.22       | **1.073/1.21**   |
+| `nix flake check --no-build` on large personal project | unknown      | unknown      | 57.720/69.37             | 36.681/117.51              | 35.318/**57.64** | **17.157**/99.63 |
 
 Nix and Lix are listed as unknown on the personal project because they error for a presently unknown reason.
 

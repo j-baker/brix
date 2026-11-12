@@ -12,6 +12,7 @@
     # binary the differential tests compare against. Both come from the same
     # revision, and the binary is substituted from the FlakeHub cache.
     nix-src.url = "github:DeterminateSystems/nix-src/v3.24.1";
+    nix-src.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs =

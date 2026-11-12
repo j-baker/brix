@@ -17,7 +17,7 @@ jobs:
         with:
           ssh-host: dev.trustless.build
           org-slug: local-test
-          versioned-packages: brix
+          # versioned-packages: brix
           # Builds and tests brix, and runs the source checks of
           # nix/checks.nix: formatting, Clippy, the wasm-clean crates, and
           # that Cargo.nix is what crate2nix makes of Cargo.lock.

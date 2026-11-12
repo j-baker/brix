@@ -1531,12 +1531,6 @@ rec {
         src = lib.cleanSourceWith { filter = sourceFilter;  src = ./crates/brix-gc; };
         libName = "brix_gc";
         license = "LGPL-2.1-or-later";
-        devDependencies = [
-          {
-            name = "bumpalo";
-            packageId = "bumpalo";
-          }
-        ];
         features = {
         };
         resolvedDefaultFeatures = [ "trace-counts" ];

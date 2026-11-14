@@ -840,7 +840,15 @@ fails rather than pass:
 then every ignored test gated on `BRIX_TEST_REAL_DAEMON` or
 `BRIX_TEST_REAL_STORE`, with those set (it needs the devshell and a
 running `nix-daemon` with a writable store); `--network` adds the
-`BRIX_TEST_NETWORK` ones. The other ignored tests are slow (the whole of
+`BRIX_TEST_NETWORK` ones. The flake check `checks.<system>.gated-tests`
+(nix/tests/gated.nix) runs the daemon- and store-gated tests in the
+sandbox too, through `scripts/test-all.sh --gated-only`: the reference
+`nix-daemon` serves a store under a root of its own, seeded with the
+closures the tests name, on a socket of its own
+(`NIX_DAEMON_SOCKET_PATH`, `NIX_REMOTE=daemon`); the diverted root stays
+invisible because brix and the oracle read it only through the daemon.
+Only the network-gated tests have no check: the sandbox has no network.
+The other ignored tests are slow (the whole of
 nixpkgs through the parser, the evaluator and the image compiler, a
 NixOS system, the fuzzer's long run) and are run by hand with
 `cargo test -- --ignored <name>`.

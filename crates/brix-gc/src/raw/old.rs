@@ -41,6 +41,20 @@ const SMALL_CLASSES: [u8; SMALL_LIMIT / size_of::<usize>() + 1] = {
     classes
 };
 
+/// Whether sweeping alone would leave the old generation fragmented enough
+/// to be worth compacting. `surviving` is the extent ever allocated (up to
+/// the bump mark) in the pages that keep at least one marked object, and
+/// `marked` the bytes marked in them.
+/// Pages with no survivor are released by a sweep at no cost, so the dead
+/// objects in them say nothing about fragmentation: a workload whose
+/// garbage dies in bulk (whole evaluations dropped at once) leaves its
+/// survivors densely packed however much of the heap was reclaimed, and
+/// compacting it would repair every pointer of the live graph to move
+/// almost nothing.
+fn fragmented(surviving: usize, marked: usize) -> bool {
+    surviving - marked > surviving / 4
+}
+
 #[inline]
 fn size_class(extent: usize) -> usize {
     if extent <= SMALL_LIMIT {
@@ -743,13 +757,16 @@ impl OldHeap {
     }
 
     pub fn should_compact(&self) -> bool {
-        let mut occupied = 0;
+        let mut surviving = 0;
         let mut marked = 0;
         for page in &self.pages {
-            occupied += (page.flags.len() - page.free_count) * page.stride;
-            marked += page.flags.iter().filter(|&&flag| flag & MARK != 0).count() * page.stride;
+            let live = page.flags.iter().filter(|&&flag| flag & MARK != 0).count();
+            if live != 0 {
+                surviving += page.bump * page.stride;
+                marked += live * page.stride;
+            }
         }
-        occupied - marked > occupied / 4
+        fragmented(surviving, marked)
     }
 
     /// Reclaim dead slots without changing live addresses. Later promotions

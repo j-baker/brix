@@ -17,7 +17,6 @@ struct View {
     stride: usize,
     slots: usize,
     bump: usize,
-    free_count: usize,
 }
 impl View {
     fn pointer(&self, slot: usize) -> Pointer {
@@ -118,7 +117,6 @@ impl Maintenance {
                 stride: page.stride,
                 slots: page.flags.len(),
                 bump: page.bump,
-                free_count: page.free_count,
             });
         }
     }
@@ -144,24 +142,28 @@ impl Maintenance {
     }
     pub fn should_compact(&self, pool: &mut Pool) -> bool {
         self.job.store(0, Ordering::Relaxed);
-        let occupied = AtomicUsize::new(0);
+        let surviving = AtomicUsize::new(0);
         let marked = AtomicUsize::new(0);
         pool.run(|_| {
-            let mut local_occupied = 0;
+            let mut local_surviving = 0;
             let mut local_marked = 0;
             self.pages(|i| {
                 let page = &self.pages[i];
-                local_occupied += (page.slots - page.free_count) * page.stride;
-                local_marked += (0..page.slots)
+                let live = (0..page.slots)
                     .filter(|&slot| page.flag(slot) & MARK != 0)
-                    .count()
-                    * page.stride;
+                    .count();
+                if live != 0 {
+                    local_surviving += page.bump * page.stride;
+                    local_marked += live * page.stride;
+                }
             });
-            occupied.fetch_add(local_occupied, Ordering::Relaxed);
+            surviving.fetch_add(local_surviving, Ordering::Relaxed);
             marked.fetch_add(local_marked, Ordering::Relaxed);
         });
-        let occupied = occupied.load(Ordering::Relaxed);
-        occupied - marked.load(Ordering::Relaxed) > occupied / 4
+        fragmented(
+            surviving.load(Ordering::Relaxed),
+            marked.load(Ordering::Relaxed),
+        )
     }
     pub fn plan(&self, plan: &mut Compaction, pool: &mut Pool) {
         let count: usize = self.pages.iter().map(|p| p.slots).sum();

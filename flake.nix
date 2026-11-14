@@ -115,8 +115,10 @@
 
       # `nix build .#checks.x86_64-linux.canBuild` is the build-time CI gate
       # executed by the Trustless build runner; `tests` runs every crate's
-      # test suite inside the sandbox, and nix/checks.nix adds the source
-      # checks (formatting, Clippy, wasm, Cargo.nix).
+      # test suite inside the sandbox, `gated-tests` the tests that need a
+      # nix-daemon (what scripts/test-all.sh runs beyond the suite), and
+      # nix/checks.nix adds the source checks (formatting, Clippy, wasm,
+      # Cargo.nix).
       checks = forAllSystems (
         system:
         let
@@ -126,6 +128,12 @@
           canBuild = built.brix;
           pgo-bolt = self.packages.${system}.brix-pgo-bolt;
           inherit (built) tests;
+          gated-tests = import ./nix/tests/gated.nix {
+            pkgs = pkgsFor system;
+            testEnv = testEnv (pkgsFor system);
+            referenceNix = nix-src.packages.${system}.default;
+            delegateNix = delegateNix (pkgsFor system);
+          };
           modules = import ./nix/tests/modules.nix {
             pkgs = pkgsFor system;
             realBrix = built.brix;

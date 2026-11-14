@@ -1648,3 +1648,71 @@ fn forwarding_handles_tiny_padded_and_unaligned_payloads() {
         }
     }
 }
+
+/// Garbage that dies in bulk empties whole slabs and leaves the survivors'
+/// slabs full: a sweep releases the empty ones, and moving the survivors
+/// would gain nothing however much of the old generation died.
+#[test]
+fn automatic_major_does_not_compact_when_whole_slabs_die() {
+    const PER_SLAB: usize = 8;
+    const SLABS: usize = 16;
+    let drops = Rc::new(Cell::new(0));
+    let mut heap = RawHeap::new(
+        Config {
+            // One slab holds `PER_SLAB` resources.
+            chunk_bytes: PER_SLAB * size_of::<Rc<Resource>>(),
+            threshold_bytes: 64,
+            steady_threshold_bytes: Some(32),
+            ..Config::default()
+        },
+        &DESCRIPTORS,
+    )
+    .unwrap();
+    let mut roots = Vec::new();
+    unsafe {
+        for _ in 0..PER_SLAB * SLABS {
+            let p = heap
+                .allocate_slow(RESOURCE, size_of::<Rc<Resource>>())
+                .unwrap();
+            p.cast::<Rc<Resource>>()
+                .as_ptr()
+                .write(Rc::new(Resource(drops.clone())));
+            roots.push(p);
+        }
+        // Promotion fills slabs in root order.
+        heap.collect_minor(
+            |t| {
+                for p in &mut roots {
+                    t.visit(p);
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(heap.stats().major_collections, 0);
+        let full = heap.capacity_bytes();
+        // Three quarters of the old generation die, slab by slab.
+        roots.drain(..PER_SLAB * SLABS * 3 / 4);
+        let retained = roots.clone();
+        heap.collect_minor(
+            |t| {
+                for p in &mut roots {
+                    t.visit(p);
+                }
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(heap.stats().major_collections, 1);
+        assert_eq!(heap.stats().compacted_bytes, 0);
+        assert_eq!(roots, retained, "survivors stay where they are");
+        assert_eq!(drops.get(), PER_SLAB * SLABS * 3 / 4);
+        assert!(
+            heap.capacity_bytes() <= full / 2,
+            "the emptied slabs are released: {} of {full} bytes remain",
+            heap.capacity_bytes()
+        );
+    }
+    drop(heap);
+    assert_eq!(drops.get(), PER_SLAB * SLABS);
+}

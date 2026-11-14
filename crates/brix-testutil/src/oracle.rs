@@ -216,6 +216,27 @@ impl Oracle {
     }
 }
 
+/// Writes the store objects `expr` makes into the real store: `nix eval`
+/// with lazy trees off, so `builtins.toFile` texts and the derivations
+/// the expression instantiates are written eagerly. The [`REAL_STORE`]
+/// and [`REAL_DAEMON`] comparisons read such objects back from the
+/// store, which only agrees once the store knows them: a developer's
+/// store has had them for ages, a fresh one (a new machine, the flake
+/// check's own daemon) has not — `nix-instantiate --eval` cannot write
+/// a derivation it names as `drvPath` and then hashes dependents of it
+/// differently, and a lazy `toFile` is never materialised for reading
+/// back as a path. A failure here is the compared run's to report, so
+/// the outcome is dropped.
+///
+/// [`REAL_STORE`]: crate::REAL_STORE
+/// [`REAL_DAEMON`]: crate::REAL_DAEMON
+pub fn warm_real_store(expr: &str) {
+    Oracle::new()
+        .config("lazy-trees = false")
+        .args(["eval", "--expr", expr])
+        .output();
+}
+
 /// What an [`Oracle`] run gave.
 #[derive(Clone, Debug)]
 pub struct OracleOutput {

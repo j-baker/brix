@@ -74,7 +74,9 @@ view or unrooted pointer crosses a parking boundary. Once everyone is stopped,
 the collector transfers nursery chunks without moving their payloads, replays
 remembered writes, and traces every worker's temporary roots and the common
 persistent roots. The existing collector then promotes/compacts and repairs
-roots and weak identities. All workers reload pointers after resuming.
+roots and weak identities. The nursery chunks it emptied go to a pool every
+worker's nursery refills from, so they are not returned to the allocator
+and faulted in again. All workers reload pointers after resuming.
 
 Compiler/source metadata and virtual-store/host caches are synchronized in the
 parallel build. Compiler writes use a reentrant metadata gate. Hot closure,

@@ -76,6 +76,11 @@ fn compare_all(cases: &[&str]) {
 #[ignore = "writes into the user's store; set BRIX_TEST_REAL_STORE=1"]
 fn copying_a_store_path_again_names_it_after_its_nar() {
     require_env(REAL_STORE);
+    // The store must already have the `toFile` text the cases copy
+    // again: with lazy trees `nix eval` computes its path without
+    // writing it, which a store that has never seen it (a new machine,
+    // the flake check's daemon) cannot read back.
+    brix_testutil::warm_real_store(r#"builtins.toFile "x" "y""#);
     compare_all(&[
         // A `toFile` text: its NAR path differs from its text path.
         r#""${/. + builtins.unsafeDiscardStringContext (builtins.toFile "x" "y")}""#,
@@ -139,6 +144,9 @@ fn a_nul_byte_from_the_host_is_a_bad_path() {
 #[ignore = "writes into the user's store; set BRIX_TEST_REAL_STORE=1"]
 fn path_names_that_are_not_utf8_are_bytes() {
     require_env(REAL_STORE);
+    // As in `copying_a_store_path_again_names_it_after_its_nar`: the
+    // copied `toFile` text must be in the store already.
+    brix_testutil::warm_real_store(r#"builtins.toFile "x" "y""#);
     compare_all(&[
         r#"let l = builtins.substring 0 1 "é"; in builtins.path { name = "a" + l; path = /. + builtins.unsafeDiscardStringContext (builtins.toFile "x" "y"); }"#,
         r#"let l = builtins.substring 0 1 "é"; in builtins.path { name = "a" + l; path = /. + builtins.unsafeDiscardStringContext (builtins.toFile "x" "y"); recursive = false; sha256 = "0000000000000000000000000000000000000000000000000000000000000000"; }"#,

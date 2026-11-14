@@ -33,6 +33,7 @@ mod pool;
 use std::alloc::{alloc, dealloc, Layout};
 use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::{Config, Error, Result, Stats};
 
@@ -74,6 +75,97 @@ impl Drop for Chunk {
     fn drop(&mut self) {
         // SAFETY: this chunk exclusively owns an allocation with this layout.
         unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+    }
+}
+
+/// Nursery chunks kept between collections.
+///
+/// A collection empties the nursery, and the mutator refills it at once
+/// with chunks of the same size. Handing the old ones back to the
+/// allocator in between makes it return their pages to the operating
+/// system and take fresh ones, each of which faults in and is zeroed
+/// again: on an evaluation that collects every half second that was a
+/// tenth of its CPU time. Only chunks of the configured size and the
+/// alignment `Space::add_chunk` gives large chunks are kept, up to the
+/// nursery budget that is about to be refilled; oversized chunks and the
+/// excess of a larger start-up nursery go back to the allocator.
+struct SpareChunks {
+    layout: Option<Layout>,
+    pointers: Vec<Pointer>,
+}
+
+impl SpareChunks {
+    fn new(chunk_bytes: usize) -> Self {
+        Self {
+            layout: Layout::from_size_align(chunk_bytes, 4096).ok(),
+            pointers: Vec::new(),
+        }
+    }
+
+    /// A kept chunk of exactly this layout, if there is one.
+    fn take(&mut self, layout: Layout) -> Option<Pointer> {
+        if self.layout == Some(layout) {
+            self.pointers.pop()
+        } else {
+            None
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.layout
+            .map_or(0, |layout| layout.size() * self.pointers.len())
+    }
+
+    /// Keeps the chunk if it has the pooled layout and fits under `limit`
+    /// bytes; otherwise it is freed.
+    fn keep(&mut self, chunk: Chunk, limit: usize) {
+        if self.layout == Some(chunk.layout)
+            && self.bytes().saturating_add(chunk.layout.size()) <= limit
+            && self.pointers.try_reserve(1).is_ok()
+        {
+            self.pointers.push(chunk.pointer);
+            std::mem::forget(chunk);
+        }
+    }
+}
+
+impl Drop for SpareChunks {
+    fn drop(&mut self) {
+        if let Some(layout) = self.layout {
+            for pointer in self.pointers.drain(..) {
+                // SAFETY: `keep` took ownership of an allocation of this layout.
+                unsafe { dealloc(pointer.as_ptr(), layout) };
+            }
+        }
+    }
+}
+
+// SAFETY: the pool exclusively owns the allocations its pointers name.
+unsafe impl Send for SpareChunks {}
+
+/// A pool of spare nursery chunks that several heaps may share.
+///
+/// Mutators that evaluate in parallel each allocate from their own
+/// nursery, and one heap collects them all
+/// ([`RawHeap::absorb_nursery`]). The chunks a collection empties
+/// therefore end up in the collecting heap, while the heaps that need
+/// chunks next are the others: all of them must take from one pool, or
+/// the collector's pool only holds memory nobody uses. The lock is taken
+/// when a nursery space opens a chunk and when a collection ends.
+#[derive(Clone)]
+pub struct SpareChunkPool(Arc<Mutex<SpareChunks>>);
+
+impl SpareChunkPool {
+    /// An empty pool for heaps with this configuration's chunk size.
+    pub fn new(config: &Config) -> Self {
+        Self(Arc::new(Mutex::new(SpareChunks::new(config.chunk_bytes))))
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SpareChunks> {
+        // A chunk list is consistent between any two of its operations.
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -169,7 +261,7 @@ impl Space {
         Some(payload)
     }
 
-    fn add_chunk(&mut self, bytes: usize) -> Result<()> {
+    fn add_chunk(&mut self, bytes: usize, spare: &mut SpareChunks) -> Result<()> {
         // Large chunks commonly sit exactly on allocator size boundaries.
         // In mimalloc v3, requesting ordinary alignment can overallocate them
         // by alignment-1 and round up to another size class; 4KiB alignment
@@ -192,7 +284,10 @@ impl Space {
         #[cfg(test)]
         reservation_checkpoint()?;
         // SAFETY: nonempty validated layout. Failure leaves this space intact.
-        let pointer = Pointer::new(unsafe { alloc(layout) }).ok_or(Error::OutOfMemory)?;
+        let pointer = match spare.take(layout) {
+            Some(pointer) => pointer,
+            None => Pointer::new(unsafe { alloc(layout) }).ok_or(Error::OutOfMemory)?,
+        };
         let active_used = self.active_capacity - self.remaining;
         if let Some(last) = self.chunks.last_mut() {
             last.used = active_used;
@@ -265,6 +360,7 @@ pub struct RawHeap {
     major_growth: usize,
     stats: Stats,
     scratch: Scratch,
+    spare: SpareChunkPool,
     #[cfg(not(target_family = "wasm"))]
     parallel_tracing: bool,
     #[cfg(not(target_family = "wasm"))]
@@ -336,6 +432,17 @@ impl VariableReservation<'_> {
 
 impl RawHeap {
     pub fn new(config: Config, descriptors: &'static [Descriptor]) -> Result<Self> {
+        Self::with_spare_chunks(config, descriptors, SpareChunkPool::new(&config))
+    }
+
+    /// A heap that takes its nursery chunks from, and returns them to,
+    /// `spare`: the pool of the heaps whose nurseries are collected
+    /// together.
+    pub fn with_spare_chunks(
+        config: Config,
+        descriptors: &'static [Descriptor],
+        spare: SpareChunkPool,
+    ) -> Result<Self> {
         let mut spaces = Vec::new();
         spaces
             .try_reserve_exact(descriptors.len())
@@ -354,6 +461,7 @@ impl RawHeap {
             major_growth: 2,
             stats: Stats::default(),
             scratch: Scratch::default(),
+            spare,
             #[cfg(not(target_family = "wasm"))]
             parallel_tracing: false,
             #[cfg(not(target_family = "wasm"))]
@@ -535,12 +643,12 @@ impl RawHeap {
         // including when the second one fails and leaves an empty first chunk.
         if self.spaces[kind_a].remaining < extent_a {
             let bytes = self.config.chunk_bytes.max(extent_a);
-            self.spaces[kind_a].add_chunk(bytes)?;
+            self.spaces[kind_a].add_chunk(bytes, &mut self.spare.lock())?;
             self.capacity = self.capacity.saturating_add(bytes);
         }
         if self.spaces[kind_b].remaining < extent_b {
             let bytes = self.config.chunk_bytes.max(extent_b);
-            self.spaces[kind_b].add_chunk(bytes)?;
+            self.spaces[kind_b].add_chunk(bytes, &mut self.spare.lock())?;
             self.capacity = self.capacity.saturating_add(bytes);
         }
         // SAFETY: descriptors were validated and both spaces now fit. This
@@ -563,7 +671,7 @@ impl RawHeap {
             return Ok(pointer);
         }
         let chunk_bytes = self.config.chunk_bytes.max(extent);
-        space.add_chunk(chunk_bytes)?;
+        space.add_chunk(chunk_bytes, &mut self.spare.lock())?;
         self.capacity = self.capacity.saturating_add(chunk_bytes);
         Ok(space
             .try_allocate(bytes, extent)
@@ -595,7 +703,7 @@ impl RawHeap {
         let extent = space.extent(max_bytes)?;
         if extent > space.remaining {
             let bytes = self.config.chunk_bytes.max(extent);
-            space.add_chunk(bytes)?;
+            space.add_chunk(bytes, &mut self.spare.lock())?;
             self.capacity = self.capacity.saturating_add(bytes);
         }
         Ok(VariableReservation { space, max_bytes })
@@ -1228,14 +1336,22 @@ impl RawHeap {
             self.old.release_empty_pages();
             self.stats.minor_collections += 1;
         }
-        for (kind, space) in self.spaces.iter_mut().enumerate() {
-            *space = Space::new(&self.descriptors[kind]).expect("validated descriptor");
-        }
-        self.capacity = 0;
         self.threshold = self
             .config
             .steady_threshold_bytes
             .unwrap_or(self.config.threshold_bytes);
+        let mut spare = self.spare.lock();
+        for (kind, space) in self.spaces.iter_mut().enumerate() {
+            let emptied = std::mem::replace(
+                space,
+                Space::new(&self.descriptors[kind]).expect("validated descriptor"),
+            );
+            for chunk in emptied.chunks {
+                spare.keep(chunk, self.threshold);
+            }
+        }
+        drop(spare);
+        self.capacity = 0;
         let live = self.old.used;
         self.stats.collections += 1;
         self.stats.last_collection_workers = workers;
@@ -2125,6 +2241,126 @@ mod tests {
         },
     ];
 
+    fn chunk(layout: Layout) -> Chunk {
+        Chunk {
+            // SAFETY: the layouts used below are nonempty.
+            pointer: Pointer::new(unsafe { alloc(layout) }).unwrap(),
+            layout,
+            used: 0,
+            first_variable: 0,
+        }
+    }
+
+    #[test]
+    fn spare_chunks_keep_only_the_pooled_layout_up_to_the_limit() {
+        let pooled = Layout::from_size_align(1 << 20, 4096).unwrap();
+        let mut spare = SpareChunks::new(1 << 20);
+        assert_eq!(spare.take(pooled), None);
+
+        let first = chunk(pooled);
+        let address = first.pointer;
+        spare.keep(first, 2 << 20);
+        spare.keep(chunk(pooled), 2 << 20);
+        assert_eq!(spare.bytes(), 2 << 20);
+        // Over the limit, larger than a nursery chunk, or otherwise
+        // aligned: freed, not kept.
+        spare.keep(chunk(pooled), 2 << 20);
+        spare.keep(
+            chunk(Layout::from_size_align(2 << 20, 4096).unwrap()),
+            usize::MAX,
+        );
+        spare.keep(
+            chunk(Layout::from_size_align(1 << 20, 8).unwrap()),
+            usize::MAX,
+        );
+        assert_eq!(spare.bytes(), 2 << 20);
+
+        assert_eq!(
+            spare.take(Layout::from_size_align(1 << 20, 8).unwrap()),
+            None
+        );
+        let second = spare.take(pooled).unwrap();
+        assert_eq!(spare.take(pooled), Some(address));
+        assert_eq!(spare.take(pooled), None);
+        // SAFETY: both were allocated with `pooled` and are owned here again.
+        unsafe {
+            dealloc(second.as_ptr(), pooled);
+            dealloc(address.as_ptr(), pooled);
+        }
+    }
+
+    #[test]
+    fn a_collection_hands_its_nursery_chunks_to_the_next_cycle() {
+        unsafe fn trace(_: Pointer, _: usize, _: &mut Tracer<'_>) {}
+        static KINDS: [Descriptor; 1] = [Descriptor {
+            name: "word",
+            fixed_size: Some(size_of::<usize>()),
+            alignment: align_of::<usize>(),
+            trace,
+            drop: None,
+        }];
+        let mut heap = RawHeap::new(
+            Config {
+                chunk_bytes: 1 << 20,
+                threshold_bytes: 4 << 20,
+                steady_threshold_bytes: Some(1 << 20),
+                ..Config::default()
+            },
+            &KINDS,
+        )
+        .unwrap();
+        let words = (1 << 20) / size_of::<usize>();
+        // SAFETY: nothing allocated here is read or kept across a collection.
+        unsafe {
+            // Three chunks in the first nursery.
+            for _ in 0..2 * words + 1 {
+                heap.allocate_slow(0, size_of::<usize>()).unwrap();
+            }
+            assert_eq!(heap.nursery_capacity_bytes(), 3 << 20);
+            heap.collect_minor(|_| {}, |_| {}).unwrap();
+            // The steady nursery is one chunk: one is kept, two are freed.
+            assert_eq!(heap.spare.lock().bytes(), 1 << 20);
+            heap.allocate_slow(0, size_of::<usize>()).unwrap();
+            assert_eq!(
+                heap.spare.lock().bytes(),
+                0,
+                "the next cycle starts in the kept chunk"
+            );
+            assert_eq!(heap.nursery_capacity_bytes(), 1 << 20);
+        }
+    }
+
+    #[test]
+    fn a_donor_refills_from_the_chunks_the_collector_emptied() {
+        unsafe fn trace(_: Pointer, _: usize, _: &mut Tracer<'_>) {}
+        static KINDS: [Descriptor; 1] = [Descriptor {
+            name: "word",
+            fixed_size: Some(size_of::<usize>()),
+            alignment: align_of::<usize>(),
+            trace,
+            drop: None,
+        }];
+        let config = Config {
+            chunk_bytes: 1 << 20,
+            threshold_bytes: 2 << 20,
+            workers: 1,
+            ..Config::default()
+        };
+        let spare = SpareChunkPool::new(&config);
+        let mut collector = RawHeap::with_spare_chunks(config, &KINDS, spare.clone()).unwrap();
+        let mut donor = RawHeap::with_spare_chunks(config, &KINDS, spare.clone()).unwrap();
+        // SAFETY: nothing allocated here is read or kept across a collection.
+        unsafe {
+            let first = donor.allocate_slow(0, size_of::<usize>()).unwrap();
+            collector.absorb_nursery(&mut donor).unwrap();
+            collector.collect_minor(|_| {}, |_| {}).unwrap();
+            assert_eq!(spare.lock().bytes(), 1 << 20);
+            let second = donor.allocate_slow(0, size_of::<usize>()).unwrap();
+            assert_eq!(second, first, "the donor's next chunk is the emptied one");
+            assert_eq!(spare.lock().bytes(), 0);
+        }
+    }
+
     #[test]
     fn absorbed_nurseries_preserve_cross_worker_edges_interiors_and_barriers() {
         unsafe fn edge(pointer: Pointer, _: usize, tracer: &mut Tracer<'_>) {
@@ -2215,7 +2451,9 @@ mod tests {
             };
             let mut space = Space::new(&descriptor).unwrap();
             let extent = space.extent(8).unwrap();
-            space.add_chunk(1 << 20).unwrap();
+            space
+                .add_chunk(1 << 20, &mut SpareChunks::new(1 << 20))
+                .unwrap();
             assert_eq!(space.chunks[0].layout.align(), alignment.max(4096));
             assert_eq!(space.chunks[0].layout.size(), 1 << 20);
             assert_eq!(

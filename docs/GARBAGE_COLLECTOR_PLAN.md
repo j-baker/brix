@@ -451,8 +451,18 @@ generational policy is:
   multiplier from postponing reclamation by many gigabytes.
 * Minor collections trace exact roots, modified old slots, and promoted young
   objects. Major collections mark all reachable old objects. Automatic majors
-  sweep when at least 75% of occupied slot capacity survives, allowing later
-  promotions to reuse holes; otherwise they compact. Explicit majors compact.
+  sweep unless the slabs that keep a survivor would be left more than a
+  quarter empty (dead slots below their bump mark), in which case they
+  compact. Slabs with no survivor are released by the sweep and do not count:
+  an evaluation that drops whole results at once (one job after another)
+  frees most of the old generation but leaves its survivors densely packed,
+  and compacting it repaired every pointer of the live graph to move almost
+  nothing. Later promotions reuse the holes a sweep leaves. Explicit majors
+  compact.
+* Nursery chunks of the configured size are kept across a collection, up to
+  the nursery budget about to be refilled, instead of being freed and
+  allocated again: the allocator otherwise returns their pages to the
+  operating system and faults fresh ones in on every cycle.
 * Include pending allocation in nursery checks on refill and at batch safepoints.
   Large requests can overshoot the soft budget; an empty nursery is not
   repeatedly collected to try to make an oversized allocation fit.

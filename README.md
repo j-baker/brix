@@ -202,6 +202,12 @@ devshell and a running `nix-daemon` with a writable store. With
 other ignored tests are slow ones (whole-nixpkgs runs, the fuzzer's long
 run), run by hand with `cargo test -- --ignored <name>`.
 
+`nix flake check` runs the same tests in the sandbox: the default suite
+as `checks.<system>.tests`, and the daemon- and store-gated ones as
+`checks.<system>.gated-tests`, against a `nix-daemon` of the check's own
+(`scripts/test-all.sh --gated-only`; nix/tests/gated.nix). Only the
+`BRIX_TEST_NETWORK=1` tests stay outside it: the sandbox has no network.
+
 ## Environment variables
 
 | Variable | Read by | Values |

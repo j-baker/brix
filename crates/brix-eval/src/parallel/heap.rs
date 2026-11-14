@@ -97,6 +97,9 @@ pub(super) struct Shared<'h> {
     budget: Arc<Budget>,
     config: Config,
     collections: AtomicUsize,
+    /// Every worker's nursery takes its chunks from this pool, which the
+    /// coordinator's collections refill.
+    spare: brix_gc::raw::SpareChunkPool,
 }
 
 impl<'h> Deref for Heap<'h> {
@@ -124,6 +127,7 @@ pub(super) unsafe fn new<'h>(config: Config, workers: usize) -> Result<Heap<'h>>
         }),
         config,
         collections: AtomicUsize::new(0),
+        spare: brix_gc::raw::SpareChunkPool::new(&config),
     });
     attach(shared, WorkerId::from_index(0))
 }
@@ -135,7 +139,8 @@ fn attach<'h>(shared: Arc<Shared<'h>>, worker: WorkerId) -> Result<Heap<'h>> {
         if let Some(storage) = &locals[worker.index()] {
             storage.clone()
         } else {
-            let mut raw = RawHeap::new(shared.config, &DESCRIPTORS)?;
+            let mut raw =
+                RawHeap::with_spare_chunks(shared.config, &DESCRIPTORS, shared.spare.clone())?;
             unsafe { raw.enable_parallel_tracing() };
             let storage = Arc::new(Storage(UnsafeCell::new(Local {
                 raw: LocalRaw {

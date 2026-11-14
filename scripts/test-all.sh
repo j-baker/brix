@@ -10,22 +10,27 @@
 #   BRIX_TEST_REAL_STORE   has the reference nix write into the user's store
 #   BRIX_TEST_NETWORK      downloads from GitHub (only with --network)
 #
-# Usage: scripts/test-all.sh [--network] [--release]
+# Usage: scripts/test-all.sh [--network] [--release] [--gated-only]
 #
 # Run it inside `nix develop` (the tests need BRIX_NIX_SRC, BRIX_NIX_BIN
 # and BRIX_NIXPKGS) on a machine with a Nix daemon and a writable store.
-# The other ignored tests are slow ones (whole-nixpkgs runs, the fuzz long
-# run), run by hand with `cargo test -p <crate> --test <file> -- --ignored
-# <name>`.
+# With --gated-only the default suite is skipped and only the gated tests
+# run: the flake check `gated-tests` (nix/tests/gated.nix) uses it, with
+# a daemon of its own, next to the `tests` check that runs the default
+# suite. The other ignored tests are slow ones (whole-nixpkgs runs, the
+# fuzz long run), run by hand with `cargo test -p <crate> --test <file>
+# -- --ignored <name>`.
 set -euo pipefail
 
 network=0
+gated_only=0
 profile=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --network) network=1; shift ;;
     --release) profile=(--release); shift ;;
-    -h | --help) sed -n '2,19p' "$0"; exit 0 ;;
+    --gated-only) gated_only=1; shift ;;
+    -h | --help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "error: unknown argument '$1' (see --help)" >&2; exit 1 ;;
   esac
 done
@@ -45,8 +50,10 @@ variables=(BRIX_TEST_REAL_DAEMON BRIX_TEST_REAL_STORE)
 log() { echo "test-all: $*" >&2; }
 failed=()
 
-log "cargo test --workspace --no-fail-fast ${profile[*]}"
-cargo test --workspace --no-fail-fast "${profile[@]}" || failed+=("cargo test --workspace")
+if [ "$gated_only" = 0 ]; then
+  log "cargo test --workspace --no-fail-fast ${profile[*]}"
+  cargo test --workspace --no-fail-fast "${profile[@]}" || failed+=("cargo test --workspace")
+fi
 
 # The gated tests, one line per test: `<crate> <test file> <variable> <name>`.
 # An ignore reason that names a BRIX_TEST_ variable in any other form than

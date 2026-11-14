@@ -44,5 +44,5 @@ pub use fs::{copy_dir, join_bytes, os, scratch_store, symlink_bytes, write_bytes
 pub use git::{git, GitRepo, GIT_DATE};
 pub use hg::{hg, hg_command, HgRepo, HG_DATE};
 pub use lfs::{LfsMode, LfsRequest, LfsServer, LFS_AUTHORIZATION};
-pub use oracle::{is_noise, strip_noise, Oracle, OracleOutput, ORACLE_NIX_CONFIG};
+pub use oracle::{is_noise, strip_noise, warm_real_store, Oracle, OracleOutput, ORACLE_NIX_CONFIG};
 pub use ssh::SshKey;

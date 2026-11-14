@@ -44,11 +44,23 @@ impl PrivateDaemon {
             .tempdir_in("/tmp")
             .expect("create the daemon's directory");
         let socket = dir.path().join("socket");
+        // `--force-trusted` (gated on the daemon-trust-override feature,
+        // for the daemon alone): the daemon must trust its clients
+        // wherever the test runs, as a developer's daemon trusts its
+        // user through `trusted-users`; untrusted, `nix` would warn
+        // about every restricted client setting and the outputs would
+        // not compare.
         let child = Command::new(nix_bin())
-            .args(["daemon", "--store"])
+            .args(["daemon", "--force-trusted", "--store"])
             .arg(dir.path().join("store"))
             .env("NIX_DAEMON_SOCKET_PATH", &socket)
-            .env("NIX_CONFIG", nix_config())
+            .env(
+                "NIX_CONFIG",
+                format!(
+                    "{}\nextra-experimental-features = daemon-trust-override",
+                    nix_config()
+                ),
+            )
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

@@ -22,7 +22,3 @@ jobs:
           # nix/checks.nix: formatting, Clippy, the wasm-clean crates, and
           # that Cargo.nix is what crate2nix makes of Cargo.lock.
           command: nix flake check -L
-      # Every test, including the ones that talk to a Nix daemon and write
-      # to its store: the determinate-nix-action above installs a daemon.
-      - name: All tests
-        run: nix develop -c scripts/test-all.sh

@@ -153,6 +153,23 @@ fn tree_expr() -> String {
 fn run_store_cases(format: Format) {
     // The cases write derivations into the user's store.
     require_env(REAL_STORE);
+    // The store must already know the derivations the cases make:
+    // `nix-instantiate --eval` is read-only, and it hashes a dependent
+    // of a derivation it only names (`dep = a.drvPath`) differently
+    // while the store lacks that `.drv`. A developer's store has them
+    // from earlier runs; a fresh one (a new machine, the flake check's
+    // daemon) does not. The `{tree}` cases are left alone: their fetched
+    // tree must NOT be in the store — read-only evaluation never adds
+    // it, and once it is valid, `nix` switches to the store's accessor
+    // and renders the tree's paths as `«path:…»`.
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        for case in STORE_CASES {
+            if !case.contains("{tree}") {
+                brix_testutil::warm_real_store(case);
+            }
+        }
+    });
     std::thread::Builder::new()
         .stack_size(1 << 30)
         .spawn(move || {

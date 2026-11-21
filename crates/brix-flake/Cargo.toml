@@ -9,6 +9,14 @@ description = "Flake references, lock files and input fetching for brix"
 
 [features]
 default = ["native"]
+# Fetching that runs external programs, as Nix runs them: `git` for
+# ssh://, file:// and other non-http(s) remotes (and for Nix 2.19 exports
+# and commit signature verification, with `ssh-keygen`/`gpg`), `hg` for
+# Mercurial inputs, `ssh` for Git LFS over ssh. Without this feature brix
+# spawns no processes: Git is fetched in-process over http(s) and git://
+# only, and whatever needs a program fails with an error naming this
+# feature.
+external-programs = ["native"]
 # Fetchers that need the network, the file system or a git implementation.
 # Without this feature the crate is pure data and compiles for wasm.
 native = [

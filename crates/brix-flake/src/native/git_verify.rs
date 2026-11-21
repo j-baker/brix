@@ -31,23 +31,34 @@
 //! read from the local checkout, or from the clone at the revision the
 //! cache resolved its `ref` to, and verified again.
 
+#[cfg(feature = "external-programs")]
 use std::collections::BTreeSet;
+#[cfg(feature = "external-programs")]
 use std::ffi::{OsStr, OsString};
+#[cfg(feature = "external-programs")]
 use std::io::{Read, Seek, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "external-programs")]
+use std::path::PathBuf;
+#[cfg(feature = "external-programs")]
 use std::process::{Command, Stdio};
 
+#[cfg(feature = "external-programs")]
 use brix_store::{Hash, HashAlgo, HashFormat};
 
 use crate::attrs::maybe_get_bool_attr;
+#[cfg(feature = "external-programs")]
 use crate::hashes::GitRev;
-use crate::input::{git_public_keys, Input, PublicKey, Scheme};
+#[cfg(feature = "external-programs")]
+use crate::input::PublicKey;
+use crate::input::{git_public_keys, Input, Scheme};
 use crate::{err, Result};
 
 /// The key types Nix accepts, each with the name OpenSSH's allowed-signers
 /// file gets for it, in the order Nix lists them when a key has another
 /// type (the iteration order of its `boost::unordered_flat_map`, as the
 /// reference Nix prints it).
+#[cfg(feature = "external-programs")]
 const KEY_TYPES: [(&str, &str); 6] = [
     ("ssh-ed25519-sk", "sk-ssh-ed25519@openssh.com"),
     ("ssh-rsa", "ssh-rsa"),
@@ -75,6 +86,14 @@ pub fn verify(input: &Input, repo: &Path) -> Result<()> {
     if !wants_verification(input)? {
         return Ok(());
     }
+    #[cfg(not(feature = "external-programs"))]
+    {
+        let _ = repo;
+        Err(err!(
+            "verifying a commit signature runs `git` (and `ssh-keygen` or `gpg`), which this build of brix does not: it was built without the `external-programs` feature"
+        ))
+    }
+    #[cfg(feature = "external-programs")]
     match input.rev()? {
         Some(rev) => verify_commit(
             OsStr::new("git"),
@@ -111,6 +130,7 @@ fn dirty_error(input: &Input) -> crate::Error {
 
 /// `GitRepoImpl::verifyCommit`: `program` (`git`) checks that `rev`, in
 /// the repository at `repo`, is signed by one of `keys`.
+#[cfg(feature = "external-programs")]
 fn verify_commit(program: &OsStr, repo: &Path, rev: &GitRev, keys: &[PublicKey]) -> Result<()> {
     // Nix makes the file before it looks at the keys.
     let allowed_signers = allowed_signers_file()?;
@@ -159,6 +179,7 @@ fn verify_commit(program: &OsStr, repo: &Path, rev: &GitRev, keys: &[PublicKey])
 /// `createTempFile()`: an empty file `nix.XXXXXX` in `$TMPDIR` (or
 /// `/tmp`), whose name git's output can quote ("…/nix.XXXXXX:1: invalid
 /// key"). Nix leaves it behind; brix removes it when done.
+#[cfg(feature = "external-programs")]
 fn allowed_signers_file() -> Result<tempfile::NamedTempFile> {
     let dir = default_temp_dir();
     tempfile::Builder::new()
@@ -177,6 +198,7 @@ fn allowed_signers_file() -> Result<tempfile::NamedTempFile> {
 }
 
 /// `defaultTempDir`: `$TMPDIR` unless unset or empty, else `/tmp`.
+#[cfg(feature = "external-programs")]
 fn default_temp_dir() -> PathBuf {
     match std::env::var_os("TMPDIR") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -190,6 +212,7 @@ fn default_temp_dir() -> PathBuf {
 ///
 /// A program that cannot be started is a failure too, with the output
 /// Nix's forked child prints when its `exec` fails.
+#[cfg(feature = "external-programs")]
 fn run_verify_commit(
     program: &OsStr,
     allowed_signers: &Path,
@@ -248,6 +271,7 @@ fn run_verify_commit(
 ///
 /// A key that is not base64 is an error (`base64::decode`), traced as Nix
 /// traces it.
+#[cfg(feature = "external-programs")]
 fn good_signature(keys: &[PublicKey]) -> Result<Option<regex::bytes::Regex>> {
     let mut class = BTreeSet::new();
     for key in keys {
@@ -286,17 +310,20 @@ fn good_signature(keys: &[PublicKey]) -> Result<Option<regex::bytes::Regex>> {
 /// when the error is printed, but the second one keeps the line it is on
 /// from being chomped: an argument that ends in a newline leaves a line of
 /// indentation after it.
+#[cfg(feature = "external-programs")]
 fn magenta(text: &str) -> String {
     format!("\x1b[35;1m{text}\x1b[0m")
 }
 
 /// An OS error as Nix's `SysError` shows it: the context, then
 /// `strerror`.
+#[cfg(feature = "external-programs")]
 fn sys_error(context: &str, e: &std::io::Error) -> crate::Error {
     err!("{}: {}", context, strerror(e))
 }
 
 /// `strerror`: the error's text without the ` (os error N)` Rust adds.
+#[cfg(feature = "external-programs")]
 fn strerror(e: &std::io::Error) -> String {
     let text = e.to_string();
     match e.raw_os_error() {
@@ -308,7 +335,41 @@ fn strerror(e: &std::io::Error) -> String {
     }
 }
 
-#[cfg(test)]
+/// Without the `external-programs` feature an input that wants
+/// verification fails before any tree is read.
+#[cfg(all(test, not(feature = "external-programs")))]
+mod refusal_tests {
+    use super::*;
+    use crate::attrs::{Attr, Attrs};
+    use crate::input::{FetchSettings, Input};
+
+    #[test]
+    fn verification_needs_the_external_programs_feature() {
+        let mut settings = FetchSettings::default();
+        settings
+            .experimental_features
+            .insert("verified-fetches".into());
+        let input = |verify_commit| {
+            let mut attrs = Attrs::new();
+            attrs.insert("type".into(), Attr::String("git".into()));
+            attrs.insert("url".into(), Attr::String("file:///tmp/r".into()));
+            if verify_commit {
+                attrs.insert("verifyCommit".into(), Attr::Bool(true));
+            }
+            Input::from_attrs(&settings, attrs).unwrap()
+        };
+        assert_eq!(
+            verify(&input(true), Path::new("/nonexistent"))
+                .unwrap_err()
+                .to_string(),
+            "verifying a commit signature runs `git` (and `ssh-keygen` or `gpg`), which this build of brix does not: it was built without the `external-programs` feature"
+        );
+        // An input that does not verify is untouched.
+        verify(&input(false), Path::new("/nonexistent")).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "external-programs"))]
 mod tests {
     use super::*;
     use crate::fetch::Fetcher;

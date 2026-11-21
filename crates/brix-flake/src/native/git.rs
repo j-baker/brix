@@ -9,8 +9,11 @@
 //! ([`super::git_legacy`]), and either export is tried when a locked
 //! `narHash` was made by the other. Remote repositories are fetched into
 //! a bare clone under the cache directory, keyed by the URL like Nix's
-//! `~/.cache/nix/gitv3/<sha256 of url>`, by running `git` as Nix runs it
-//! (with gix when there is no `git`, as Nix falls back to libgit2); local
+//! `~/.cache/nix/gitv3/<sha256 of url>`: over `http(s)` and `git` with
+//! gix and brix's own HTTP client, never by running `git` (where Nix runs
+//! it whenever one is on `PATH`, see [`fetches_with_git`]); over `ssh`,
+//! `file` and anything else by running `git` as Nix runs it (with gix
+//! when there is no `git`, as Nix falls back to libgit2). Local
 //! repositories are opened in place.
 //!
 //! A local working tree without `ref` or `rev` is not exported at all:
@@ -256,10 +259,12 @@ struct Ctx<'a> {
     /// Nix runs `git` for all it asks of a repository to fetch from (its
     /// `HEAD`, the fetch, the clone's remembered `HEAD`), passing on what
     /// git prints, and fetches with libgit2 only when there is no `git`
-    /// on `PATH`. brix does the same ([`git_on_path`]), with gix in
-    /// libgit2's place, so that with `git` the messages, and the
-    /// protocols, proxies, credentials and certificates git handles, are
-    /// Nix's.
+    /// on `PATH`. brix runs `git` ([`git_on_path`]) only for a URL whose
+    /// transport it cannot speak in-process ([`fetches_with_git`]): `ssh`
+    /// and the rest keep git's messages, credentials and protocols, which
+    /// are Nix's; `http(s)` and `git` URLs are fetched with gix (in
+    /// libgit2's place) and brix's own HTTP client, as Nix fetches them
+    /// only without `git`.
     git: bool,
 }
 
@@ -409,7 +414,7 @@ fn fetch_commit(
                     return Ok(None);
                 }
                 let refspec = fetch_refspec(all_refs, rev, &ref_);
-                let fetched = if ctx.git {
+                let fetched = if fetches_with_git(ctx, url) {
                     fetch_with_git(&dir, url, &refspec, shallow)
                 } else {
                     fetch_remote(http, &repo, url, &refspec, shallow)
@@ -438,7 +443,7 @@ fn fetch_commit(
                     }
                 }
                 if original_ref.is_none() {
-                    store_cached_head(ctx.git, &dir, &repo, &ref_, url, warn)?;
+                    store_cached_head(fetches_with_git(ctx, url), &dir, &repo, &ref_, url, warn)?;
                 }
             }
             let rev = match rev {
@@ -549,6 +554,13 @@ fn commit_tree(
     if hash == expected {
         return Ok((tree, computed.then_some(hash)));
     }
+    // The other export is Nix 2.19's when `use_legacy` is false, and runs
+    // `git`: without the `external-programs` feature there is none to try,
+    // and the mismatch is reported for the tree at hand.
+    #[cfg(not(feature = "external-programs"))]
+    if !use_legacy {
+        return Ok((tree, None));
+    }
     let other = export(ctx, source, input, !use_legacy, &display)?;
     let (other_hash, other_computed) = nar_hash_of(ctx, &other)?;
     if other_hash != expected {
@@ -647,16 +659,23 @@ fn export(
         if legacy { ";legacy" } else { "" }
     );
     let tree: Arc<dyn SourceAccessor> = if legacy {
+        #[cfg(not(feature = "external-programs"))]
+        return Err(err!(
+            "exporting a Git commit as Nix 2.19 did runs `git`, which this build of brix does not: it was built without the `external-programs` feature"
+        ));
         // `git -C <repo> --git-dir <git dir> …`: a checkout's `.git`, or
         // the bare clone itself.
-        let (repo_dir, git_dir) = match source.location {
-            Location::Local(path) => (path.as_path(), ".git"),
-            Location::Remote(_) => (source.repo.git_dir(), "."),
-        };
-        let mut tree =
-            super::git_legacy::export(repo_dir, git_dir, &source.rev, submodules, ctx.warn)?;
-        tree.set_display_prefix(display);
-        Arc::new(tree)
+        #[cfg(feature = "external-programs")]
+        {
+            let (repo_dir, git_dir) = match source.location {
+                Location::Local(path) => (path.as_path(), ".git"),
+                Location::Remote(_) => (source.repo.git_dir(), "."),
+            };
+            let mut tree =
+                super::git_legacy::export(repo_dir, git_dir, &source.rev, submodules, ctx.warn)?;
+            tree.set_display_prefix(display);
+            Arc::new(tree)
+        }
     } else {
         let (mut tree, attribute_files) = export_tree(source.repo, source.commit)?;
         tree.set_display_prefix(display);
@@ -1184,10 +1203,10 @@ fn fetch_refspec(all_refs: bool, rev: Option<GitRev>, ref_: &str) -> String {
     }
 }
 
-/// `GitRepo::fetch` without `git` ([`Ctx::git`]; Nix's libgit2 fallback):
-/// fetch `refspec` (and nothing else: no other branch, no tags) of `url`
-/// into the clone with gix, forced as `git fetch --force` is, and with
-/// `HEAD` fetched to where git puts it.
+/// `GitRepo::fetch` without `git` (not [`fetches_with_git`]; Nix's
+/// libgit2 fallback): fetch `refspec` (and nothing else: no other branch,
+/// no tags) of `url` into the clone with gix, forced as `git fetch
+/// --force` is, and with `HEAD` fetched to where git puts it.
 fn fetch_remote(
     http: &HttpClient,
     repo: &gix::Repository,
@@ -1222,10 +1241,11 @@ fn fetch_remote(
 }
 
 /// A connection for fetching from `remote` (whose URL is `url`) without
-/// `git` ([`Ctx::git`]): over brix's HTTP client for `http` and `https`
-/// (see [`super::git_http`]), so that gix trusts the certificates
-/// downloads trust, and with gix's own transports for the rest (`file`,
-/// `ssh`, `git`).
+/// `git` (not [`fetches_with_git`]): over brix's HTTP client for `http`
+/// and `https` (see [`super::git_http`]), so that gix trusts the
+/// certificates downloads trust, and with gix's own transports for the
+/// rest (`file`, `ssh`, `git`; only `git` is reached with a `git` on
+/// `PATH`, the others spawn `git-upload-pack` or `ssh` themselves).
 fn connect<'a, 'repo>(
     http: &HttpClient,
     remote: &'a gix::Remote<'repo>,
@@ -1249,13 +1269,24 @@ fn connect<'a, 'repo>(
             remote.to_connection_with_transport(Box::new(transport) as Box<dyn Transport + Send>)
         );
     }
+    // gix's `file` and `ssh` transports run `git-upload-pack` or `ssh`;
+    // only its `git` (TCP) transport is in-process.
+    #[cfg(not(feature = "external-programs"))]
+    if gix_url.scheme != gix::url::Scheme::Git {
+        return Err(err!(
+            "fetching '{}' needs an external program for its '{}' transport, which this build of brix does not run: it was built without the `external-programs` feature",
+            url,
+            gix_url.scheme.as_str()
+        ));
+    }
     remote
         .connect(gix::remote::Direction::Fetch)
         .map_err(connect_err)
 }
 
-/// `readHead` without `git` ([`Ctx::git`]): what a repository's `HEAD`
-/// is, as `git ls-remote --symref` reports it ([`read_head_with_git`]):
+/// `readHead` without `git` (not [`fetches_with_git`]): what a
+/// repository's `HEAD` is, as `git ls-remote --symref` reports it
+/// ([`read_head_with_git`]):
 /// the branch it points at (`refs/heads/main`), or the revision when it
 /// is detached. `None` when there is no such `HEAD`.
 fn read_head(http: &HttpClient, repo: &gix::Repository, url: &str) -> Result<Option<String>> {
@@ -1345,15 +1376,14 @@ fn set_write_time(path: &Path, now: i64) -> std::result::Result<(), String> {
 /// `getDefaultRef` for a repository to fetch from: `readHeadCached` (the
 /// remembered `HEAD` while it is younger than `tarball-ttl`, else the
 /// remote's, else the remembered one anyway), or `master`. The remote's
-/// `HEAD` is asked of `git ls-remote`, as Nix asks it, so that git says
-/// why it cannot answer; without `git`, of gix, whose error brix gives as
-/// a warning.
+/// `HEAD` is asked of `git ls-remote` ([`fetches_with_git`]), as Nix asks
+/// it, so that git says why it cannot answer; otherwise of gix, whose
+/// error brix gives as a warning.
 fn default_remote_ref(ctx: &Ctx<'_>, repo: &gix::Repository, url: &str) -> Result<String> {
     let Ctx {
         http,
         settings,
         warn,
-        git,
         ..
     } = *ctx;
     let cached = cached_head(repo)?;
@@ -1365,7 +1395,7 @@ fn default_remote_ref(ctx: &Ctx<'_>, repo: &gix::Repository, url: &str) -> Resul
     }
     // `git ls-remote` failing only means there is no answer: git says why
     // on stderr.
-    let remote = if git {
+    let remote = if fetches_with_git(ctx, url) {
         read_head_with_git(url)?
     } else {
         read_head(http, repo, url).unwrap_or_else(|e| {
@@ -1388,10 +1418,18 @@ fn default_remote_ref(ctx: &Ctx<'_>, repo: &gix::Repository, url: &str) -> Resul
     Ok("master".to_owned())
 }
 
+/// Without the `external-programs` feature brix runs no `git` at all:
+/// see [`fetches_with_git`].
+#[cfg(not(feature = "external-programs"))]
+fn git_on_path() -> bool {
+    false
+}
+
 /// `ExecutablePath::load().findName("git")`, which decides whether Nix
 /// fetches with `git` (see [`Ctx::git`]): whether a directory of `PATH`
 /// (an empty entry being the current directory) holds a regular file
 /// `git` that this process may execute.
+#[cfg(feature = "external-programs")]
 fn git_on_path() -> bool {
     let Some(path) = std::env::var_os("PATH") else {
         return false;
@@ -1411,6 +1449,19 @@ fn git_on_path() -> bool {
         // followed) that `access(X_OK)` allows.
         candidate.is_file() && rustix::fs::access(&candidate, rustix::fs::Access::EXEC_OK).is_ok()
     })
+}
+
+/// Whether a repository at `url` is asked with `git` when one is on
+/// `PATH` ([`Ctx::git`]): only over a transport brix cannot speak
+/// in-process. `http(s)` runs on brix's HTTP client (see [`connect`])
+/// and `git` on gix's own TCP transport; for `ssh` and `file` gix would
+/// run `ssh` or `git-upload-pack` itself, so the `git` binary, which
+/// handles them (and whatever else, `ftp(s)`) as Nix does, is kept. The
+/// `url` attribute was normalised by `fixGitURL`, so matching its prefix
+/// is matching its scheme.
+fn fetches_with_git(ctx: &Ctx<'_>, url: &str) -> bool {
+    ctx.git
+        && !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("git://"))
 }
 
 /// `git` with `args`, in the bare clone at `clone` if there is one (`-C
@@ -1482,7 +1533,8 @@ fn fetch_with_git(clone: &Path, url: &str, refspec: &str, shallow: bool) -> Resu
 /// `storeCachedHead`: remember the remote's `HEAD` branch as the clone's
 /// (at `clone`) own `HEAD`, which also renews it for `tarball-ttl`. Nix
 /// runs `git symbolic-ref`, which refuses a target outside `refs/` and
-/// says so, and warns when it fails; without `git` brix edits the
+/// says so, and warns when it fails; when the fetch itself ran without
+/// `git` (`git` false here, see [`fetches_with_git`]) brix edits the
 /// reference with gix.
 fn store_cached_head(
     git: bool,
@@ -1663,6 +1715,7 @@ fn export_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "external-programs")]
     use crate::fetch::tree_nar_hash;
 
     #[test]
@@ -1729,6 +1782,7 @@ mod tests {
         }
 
         /// The refs of the clone `url` was fetched into.
+        #[cfg(feature = "external-programs")]
         fn clone_refs(&self, url: &str) -> Vec<String> {
             let dir = cache_path(&self.cache, url, false);
             let refs = git(&dir, &["for-each-ref", "--format=%(refname)"]);
@@ -1738,6 +1792,7 @@ mod tests {
 
     use std::cell::RefCell;
 
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_remote_without_ref_is_fetched_at_its_head_branch() {
         let repos = Repos::new();
@@ -1755,6 +1810,7 @@ mod tests {
         assert_eq!(repos.clone_refs(&url), ["refs/heads/main", "refs/tags/v1"]);
     }
 
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_remote_is_fetched_by_ref_and_by_rev() {
         let repos = Repos::new();
@@ -1790,6 +1846,7 @@ mod tests {
     /// A ref fetched less than `tarball-ttl` ago is taken from the clone
     /// as it is (by any input naming it: here the second names it by
     /// itself); an older one is fetched again, into the same clone.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_second_fetch_updates_the_existing_clone() {
         let repos = Repos::new();
@@ -1834,6 +1891,7 @@ mod tests {
 
     /// When fetching a ref the clone has fails, Nix logs the error, warns
     /// and goes on with the clone's version.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_failed_fetch_of_a_ref_the_clone_has_is_got_past() {
         use std::sync::{Arc, Mutex};
@@ -1887,6 +1945,7 @@ mod tests {
 
     /// `HEAD`, as a ref, is fetched to `refs/heads/HEAD`, where it is
     /// found, as in Nix.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn head_as_a_ref_is_fetched_to_a_branch_of_its_name() {
         let repos = Repos::new();
@@ -1903,6 +1962,7 @@ mod tests {
         assert!(refs.contains(&"refs/heads/HEAD".to_owned()), "{refs:?}");
     }
 
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_broken_clone_directory_is_set_up_again() {
         let repos = Repos::new();
@@ -1922,6 +1982,7 @@ mod tests {
     /// Another process holding a clone's lock (`<clone>.lock`, as Nix's
     /// `PathLocks` names it) makes a fetch into the clone wait; a
     /// temporary clone a killed process left is set up anew under it.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn fetches_into_a_clone_wait_for_other_processes() {
         let repos = Repos::new();
@@ -1956,53 +2017,91 @@ mod tests {
         assert!(!Path::new(&tmp).exists());
     }
 
-    /// [`fetch`] as when no `git` is on `PATH` ([`Ctx::git`]): with gix.
-    fn fetch_with_gix(
-        http: &HttpClient,
-        cache_dir: &Path,
-        settings: &FetchSettings,
-        input: &Input,
-    ) -> Result<FetchedTree> {
-        let ctx = Ctx {
-            http,
-            cache_dir,
-            settings,
-            warn: &|_: &str| {},
-            hashes: None,
-            git: false,
-        };
-        get_accessor(&ctx, input, None, true)
+    /// Repositories over `http(s)` and `git` are never asked with the
+    /// `git` binary ([`fetches_with_git`]); `ssh`, `file` and the rest
+    /// are, when one is on `PATH`.
+    #[test]
+    fn only_non_native_transports_fetch_with_git() {
+        let repos = Repos::new();
+        let settings = FetchSettings::default();
+        let http = HttpClient::new();
+        for (git, url, expected) in [
+            (true, "https://example.org/repo.git", false),
+            (true, "http://example.org/repo.git", false),
+            (true, "git://example.org/repo.git", false),
+            (true, "ssh://git@example.org/repo.git", true),
+            (true, "file:///tmp/repo.git", true),
+            (true, "ftp://example.org/repo.git", true),
+            (false, "ssh://git@example.org/repo.git", false),
+            (false, "file:///tmp/repo.git", false),
+        ] {
+            let ctx = Ctx {
+                http: &http,
+                cache_dir: &repos.cache,
+                settings: &settings,
+                warn: &|_: &str| {},
+                hashes: None,
+                git,
+            };
+            assert_eq!(
+                fetches_with_git(&ctx, url),
+                expected,
+                "git on PATH: {git}, url: {url}"
+            );
+        }
     }
 
-    /// With `git` on `PATH`, Git over HTTPS is git's, as in Nix: it trusts
-    /// what git trusts, not the CA file brix's downloads trust
-    /// (`ssl-cert-file`), which Nix does not hand to git either; the test
-    /// CA is not among what git trusts. Without `git` it goes through
-    /// brix's HTTP client, so it trusts that CA file and nothing else.
+    /// Without the `external-programs` feature only `http(s)` and `git`
+    /// transports fetch: the rest would run a program (`git`, or gix's
+    /// `ssh`/`git-upload-pack`) and are refused with an error naming the
+    /// feature.
+    #[cfg(not(feature = "external-programs"))]
     #[test]
-    fn https_remotes_trust_git_or_the_ca_file() {
+    fn non_native_transports_need_the_external_programs_feature() {
+        let repos = Repos::new();
+        let rev = repos.rev("main");
+        let url = format!("git+file://{}?rev={rev}", repos.bare.display());
+        let settings = FetchSettings::default();
+        let input = Input::from_url_str(&settings, &url, true).unwrap();
+        let err = fetch(
+            &HttpClient::new(),
+            &repos.cache,
+            &settings,
+            &input,
+            &|_: &str| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "fetching 'file://{}' needs an external program for its 'file' transport, which this build of brix does not run: it was built without the `external-programs` feature",
+                repos.bare.display()
+            )
+        );
+    }
+
+    /// Git over HTTPS goes through brix's HTTP client whether or not
+    /// `git` is on `PATH` ([`fetches_with_git`]): it trusts the CA file
+    /// brix's downloads trust (`ssl-cert-file`) and nothing else. (Nix
+    /// with `git` on `PATH` runs `git`, which trusts its own
+    /// configuration and not that file; brix deviates, see
+    /// KNOWN_DEVIATIONS.md.)
+    #[test]
+    fn https_remotes_trust_the_ca_file() {
         use super::super::test_https::{fixture, git_http_backend, serve};
-        assert!(git_on_path(), "the tests need `git` on PATH");
+        #[cfg(feature = "external-programs")]
+        assert!(git_on_path(), "the test shows `git` on PATH is not used");
         let repos = Repos::new();
         let root = repos.bare.parent().unwrap().to_path_buf();
         let base = serve(move |request| git_http_backend(&root, request));
         let url = format!("git+{base}/bare.git");
         let settings = FetchSettings::default();
         let input = Input::from_url_str(&settings, &url, true).unwrap();
-        let http = HttpClient::with_ca_file(Some(&fixture("ca.pem")));
-        let Err(err) = fetch(&http, &repos.cache, &settings, &input, &|_: &str| {}) else {
-            panic!("git trusts the test CA");
-        };
-        assert_eq!(
-            err.to_string(),
-            format!("Failed to fetch git repository '{base}/bare.git'")
-        );
-
-        let fetch_with = |ca: &Path| {
+        let fetch_with = |ca: &Path, input: &Input| {
             let http = HttpClient::with_ca_file(Some(ca));
-            fetch_with_gix(&http, &repos.cache, &settings, &input)
+            fetch(&http, &repos.cache, &settings, input, &|_: &str| {})
         };
-        let fetched = fetch_with(&fixture("ca.pem")).unwrap();
+        let fetched = fetch_with(&fixture("ca.pem"), &input).unwrap();
         assert_eq!(
             fetched.input.rev().unwrap().unwrap().to_hex(),
             repos.rev("main")
@@ -2010,8 +2109,7 @@ mod tests {
         assert_eq!(fetched.input.ref_().unwrap(), Some("refs/heads/main"));
         // Another branch needs another fetch.
         let other = Input::from_url_str(&settings, &format!("{url}?ref=other"), true).unwrap();
-        let http = HttpClient::with_ca_file(Some(&fixture("ca.pem")));
-        let fetched = fetch_with_gix(&http, &repos.cache, &settings, &other).unwrap();
+        let fetched = fetch_with(&fixture("ca.pem"), &other).unwrap();
         assert_eq!(
             fetched.input.rev().unwrap().unwrap().to_hex(),
             repos.rev("other")
@@ -2022,8 +2120,7 @@ mod tests {
             fixture("other-ca.pem"),
             PathBuf::from("/nonexistent/ca.pem"),
         ] {
-            let http = HttpClient::with_ca_file(Some(&ca));
-            let Err(err) = fetch_with_gix(&http, &repos.cache, &settings, &third) else {
+            let Err(err) = fetch_with(&ca, &third) else {
                 panic!("{}: an untrusted server is refused", ca.display());
             };
             let text = err.to_string();
@@ -2192,6 +2289,7 @@ mod tests {
     /// A bare clone is fetched like a remote: a relative submodule URL
     /// resolves against its `file://` URL as libgit2 does it, losing the
     /// `/` after `file://`, which Nix then refuses; an absolute one works.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn the_submodules_of_a_remote_resolve_against_its_url() {
         let t = WithSubmodule::new();
@@ -2340,6 +2438,7 @@ mod tests {
 
     /// A repository whose `git archive` differs from its tree:
     /// `export-subst` and `export-ignore`.
+    #[cfg(feature = "external-programs")]
     fn archive_repo() -> (GitRepo, String) {
         let repo = GitRepo::new();
         repo.write(
@@ -2354,6 +2453,7 @@ mod tests {
 
     /// With `nix-219-compat` a commit is exported by `git archive`, which
     /// Nix announces and fingerprints as `;e;legacy`.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn nix_219_compat_exports_with_git_archive() {
         let (repo, rev) = archive_repo();
@@ -2405,6 +2505,7 @@ mod tests {
 
     /// A locked `narHash` made by the other export is accepted, with
     /// Nix's warning when it was Nix 2.19's.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_nar_hash_made_by_the_other_export_is_accepted() {
         let (repo, rev) = archive_repo();
@@ -2540,6 +2641,7 @@ mod tests {
     /// Nix takes for a repository to fetch from and has `git` read: each
     /// of the two tries of the parent warns twice about its `HEAD`, and
     /// the fetch fails.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn missing_submodule_checkouts_are_fetched_like_nix() {
         let t = WithSubmodule::new();

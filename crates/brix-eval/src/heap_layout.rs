@@ -320,6 +320,33 @@ const _: () = {
     assert!(size_of::<RawError>() == size_of::<usize>());
 };
 
+// Layouts traced through another kind's descriptor, destructured here with no
+// `..` so adding a field fails to compile until the shared tracer is extended.
+// trace_env walks RawEnvOne through its RawEnv prefix plus the slot array;
+// trace_cell reads the RawValue at offset zero of either RawCell variant.
+const _: () = {
+    #[allow(unused)]
+    fn env_one(
+        RawEnvOne {
+            header: _,
+            value: _,
+        }: &RawEnvOne,
+    ) {
+    }
+    #[cfg(not(brix_parallel))]
+    #[allow(unused)]
+    fn cell(RawCell { value: _ }: &RawCell) {}
+    #[cfg(brix_parallel)]
+    #[allow(unused)]
+    fn cell(
+        RawCell {
+            value: _,
+            publication: _,
+        }: &RawCell,
+    ) {
+    }
+};
+
 pub(crate) const CELL: usize = 0;
 pub(crate) const STRING: usize = 1;
 pub(crate) const PATH: usize = 2;
@@ -391,56 +418,198 @@ pub(crate) static DESCRIPTORS: [Descriptor; 17] = [
 // All trace callbacks receive initialized payloads of their declared kind.
 // Reads copy pointer/scalar values into locals; only raw writes modify the
 // payload. No reference into an allocation survives a relocation call.
+//
+// Drift defense: every field of a traced layout is visited through TraceField,
+// struct tracers destructure their layout with no `..`, and enum tracers have
+// no wildcard arm. Adding a field or variant therefore fails to compile until
+// its tracing behavior is chosen explicitly.
 
-#[inline(always)]
-unsafe fn trace_pointer<T>(slot: *mut NonNull<T>, tracer: &mut Tracer<'_>) {
-    // SAFETY: the descriptor identifies this initialized managed pointer field.
-    unsafe { slot.write(tracer.relocate(slot.read().cast()).cast()) };
+/// Exact tracing for one field of a managed object. Every field type that can
+/// appear in a traced layout chooses its behavior here once; `trace_fields!`
+/// fails to compile when a struct gains a field, forcing that choice. The
+/// root registry's slice descriptors delegate here too, so slice
+/// canonicalization has a single implementation.
+pub(super) trait TraceField {
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>);
 }
 
-#[inline(always)]
-unsafe fn trace_cell_pointer(slot: *mut CellPtr, tracer: &mut Tracer<'_>) {
-    // SAFETY: these fields always point to the start of a CELL allocation.
-    unsafe { slot.write(tracer.relocate_fixed::<RawCell, CELL>(slot.read())) };
+/// Edges pointing at the start of their target's allocation, relocated through
+/// the generic owner lookup. `CellPtr` and `NonNull<RawApp>` are excluded:
+/// they use the cheaper fixed-kind relocation below.
+macro_rules! trace_owner_pointer {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl TraceField for NonNull<$ty> {
+            #[inline(always)]
+            unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+                // SAFETY: the descriptor identifies this initialized managed
+                // pointer field; relocation preserves the target's identity.
+                unsafe { slot.write(tracer.relocate(slot.read().cast()).cast()) };
+            }
+        }
+    )+};
 }
 
-#[inline(always)]
-unsafe fn trace_slice<T>(slot: *mut RawSlice<T>, tracer: &mut Tracer<'_>) {
-    // SAFETY: the descriptor identifies an initialized slice, whose nonempty
-    // data pointer is in bounds of a live owner; relocation preserves offset.
-    unsafe {
-        let slice = slot.read();
-        let ptr = if slice.len == 0 {
-            NonNull::dangling()
-        } else {
-            tracer.relocate(slice.ptr.cast()).cast()
-        };
-        slot.write(RawSlice {
-            ptr,
-            len: slice.len,
-        });
+trace_owner_pointer!(
+    RawStr,
+    RawPath,
+    RawBindings,
+    RawList,
+    RawEnv,
+    RawError,
+    RawNode
+);
+
+impl TraceField for CellPtr {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // SAFETY: these fields always point to the start of a CELL allocation.
+        unsafe { slot.write(tracer.relocate_fixed::<RawCell, CELL>(slot.read())) };
     }
+}
+
+impl TraceField for NonNull<RawApp> {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // SAFETY: application edges point to the exact start of an APP
+        // allocation, for ordinary and partial primop applications alike.
+        unsafe { slot.write(tracer.relocate_fixed::<RawApp, APP>(slot.read())) };
+    }
+}
+
+impl TraceField for Option<NonNull<RawEnv>> {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // SAFETY: an initialized optional parent edge; None traces nothing.
+        unsafe {
+            if let Some(mut parent) = slot.read() {
+                trace_in_place(&mut parent, tracer);
+                slot.write(Some(parent));
+            }
+        }
+    }
+}
+
+impl<T> TraceField for RawSlice<T> {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // SAFETY: the descriptor identifies an initialized slice, whose nonempty
+        // data pointer is in bounds of a live owner; relocation preserves offset.
+        // The destructure and rebuild are exhaustive: a new field needs tracing.
+        unsafe {
+            let RawSlice { ptr, len } = slot.read();
+            let ptr = if len == 0 {
+                NonNull::dangling()
+            } else {
+                tracer.relocate(ptr.cast()).cast()
+            };
+            slot.write(RawSlice { ptr, len });
+        }
+    }
+}
+
+/// Field types with no managed edges. Each is listed deliberately with the
+/// reason; a blanket implementation would silently skip a future
+/// pointer-bearing field type.
+macro_rules! trace_nothing {
+    ($($ty:ty: $why:literal),+ $(,)?) => {$(
+        #[doc = $why]
+        impl TraceField for $ty {
+            #[inline(always)]
+            unsafe fn trace_field(_: *mut Self, _: &mut Tracer<'_>) {}
+        }
+    )+};
+}
+
+trace_nothing! {
+    Symbol: "interned id into permanent symbol storage",
+    SrcPos: "scalar source position",
+    AccessorId: "scalar store accessor id",
+    GlobalNode: "id of a permanent compiled-code node",
+    Option<GlobalNode>: "id of a permanent compiled-code node",
+    u32: "plain scalar",
+}
+
+impl TraceField for RawBindings {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // Exhaustive: a field added to the shared bindings header must be
+        // traced here (it is embedded in TREE_BINDINGS and flat bindings).
+        #[allow(unused)]
+        fn exhaustive(RawBindings { pos: _, len: _ }: &RawBindings) {}
+        // SAFETY: the header's initialized fields, visited in place.
+        unsafe {
+            TraceField::trace_field(addr_of_mut!((*slot).pos), tracer);
+            TraceField::trace_field(addr_of_mut!((*slot).len), tracer);
+        }
+    }
+}
+
+impl TraceField for RawAttr {
+    #[inline(always)]
+    unsafe fn trace_field(slot: *mut Self, tracer: &mut Tracer<'_>) {
+        // Exhaustive: a new attribute field must choose its tracing here.
+        #[allow(unused)]
+        fn exhaustive(
+            RawAttr {
+                name: _,
+                pos: _,
+                value: _,
+            }: &RawAttr,
+        ) {
+        }
+        // SAFETY: an initialized attribute; each field is visited in place and
+        // only the cell edge is rewritten.
+        unsafe {
+            TraceField::trace_field(addr_of_mut!((*slot).name), tracer);
+            TraceField::trace_field(addr_of_mut!((*slot).pos), tracer);
+            TraceField::trace_field(addr_of_mut!((*slot).value), tracer);
+        }
+    }
+}
+
+/// Trace one field of an enum payload copied to a local. The borrow pins the
+/// element type, so match arms stay free of pointer casts.
+#[inline(always)]
+unsafe fn trace_in_place<T: TraceField>(slot: &mut T, tracer: &mut Tracer<'_>) {
+    // SAFETY: forwarded to the field's tracer; `slot` is an exclusive borrow
+    // of a local copy, never a reference into the moving allocation.
+    unsafe { T::trace_field(slot, tracer) };
+}
+
+/// A descriptor trace function for a fixed-layout struct. The destructure has
+/// no `..`, so adding a field fails to compile until it is listed here and has
+/// a TraceField implementation.
+macro_rules! trace_fields {
+    ($fn_name:ident, $ty:ident { $($field:ident),+ $(,)? }) => {
+        unsafe fn $fn_name(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
+            #[allow(unused)]
+            fn exhaustive($ty { $($field: _),+ }: &$ty) {}
+            let p = object.cast::<$ty>().as_ptr();
+            // SAFETY: the descriptor identifies an initialized object of this
+            // layout; every field projection is in bounds and visited once.
+            unsafe { $(TraceField::trace_field(addr_of_mut!((*p).$field), tracer);)+ }
+        }
+    };
 }
 
 unsafe fn trace_cell(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
     // SAFETY: RawValue is Copy; matching a local enum examines only its active
     // variant, including when an Int's bits resemble an allocated address.
+    // No wildcard arm: a new variant must choose its tracing here.
     unsafe {
         let slot = object.cast::<RawValue>().as_ptr();
         let mut value = slot.read();
         match &mut value {
-            RawValue::String(p) => trace_pointer(p, tracer),
-            RawValue::Path(p) => trace_pointer(p, tracer),
-            RawValue::Attrs(p) => trace_pointer(p, tracer),
-            RawValue::List(p) => trace_pointer(p, tracer),
-            RawValue::Lambda { env, .. } | RawValue::Thunk { env, .. } => {
-                trace_pointer(env, tracer)
+            RawValue::String(p) => trace_in_place(p, tracer),
+            RawValue::Path(p) => trace_in_place(p, tracer),
+            RawValue::Attrs(p) => trace_in_place(p, tracer),
+            RawValue::List(p) => trace_in_place(p, tracer),
+            RawValue::Lambda { env, node: _ } | RawValue::Thunk { env, node: _ } => {
+                trace_in_place(env, tracer)
             }
-            RawValue::PrimOpApp(p) | RawValue::App(p) => {
-                // Both variants point to the exact start of an APP allocation.
-                *p = tracer.relocate_fixed::<RawApp, APP>(*p);
-            }
-            RawValue::Failed(p) => trace_pointer(p, tracer),
+            // Both variants point to the exact start of an APP allocation.
+            RawValue::PrimOpApp(p) | RawValue::App(p) => trace_in_place(p, tracer),
+            RawValue::Failed(p) => trace_in_place(p, tracer),
             RawValue::Int(_)
             | RawValue::Float(_)
             | RawValue::Bool(_)
@@ -452,92 +621,58 @@ unsafe fn trace_cell(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
     }
 }
 
-unsafe fn trace_string(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: a string consists of these two initialized raw slices.
-    unsafe {
-        let p = object.cast::<RawStr>().as_ptr();
-        trace_slice(addr_of_mut!((*p).bytes), tracer);
-        trace_slice(addr_of_mut!((*p).context), tracer);
+trace_fields!(trace_string, RawStr { bytes, context });
+trace_fields!(
+    trace_path,
+    RawPath {
+        accessor,
+        path,
+        literal
     }
-}
-
-unsafe fn trace_path(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: the accessor id is scalar; path is the only pointer field.
-    unsafe {
-        trace_slice(
-            addr_of_mut!((*object.cast::<RawPath>().as_ptr()).path),
-            tracer,
-        )
-    };
-}
-
-unsafe fn trace_list(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: list points to an initialized cell-edge buffer.
-    unsafe {
-        trace_slice(
-            addr_of_mut!((*object.cast::<RawList>().as_ptr()).elems),
-            tracer,
-        )
-    };
-}
-
-unsafe fn trace_app(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: both application edges are initialized cell pointers.
-    unsafe {
-        let p = object.cast::<RawApp>().as_ptr();
-        trace_cell_pointer(addr_of_mut!((*p).fun), tracer);
-        trace_cell_pointer(addr_of_mut!((*p).arg), tracer);
-    }
-}
+);
+trace_fields!(trace_list, RawList { elems });
+trace_fields!(trace_app, RawApp { fun, arg });
+trace_fields!(trace_tree_bindings, RawTreeBindings { header, root });
 
 unsafe fn trace_env(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
     // SAFETY: the initialized header is followed by len initialized cell edges.
+    // The exhaustive header rebuild means a new RawEnv field must be traced.
     unsafe {
         let p = object.cast::<RawEnv>().as_ptr();
-        let up = addr_of_mut!((*p).up);
-        if let Some(mut parent) = up.read() {
-            trace_pointer(&mut parent, tracer);
-            up.write(Some(parent));
-        }
-        let len = addr_of_mut!((*p).len).read() as usize;
+        let RawEnv { mut up, len } = p.read();
+        trace_in_place(&mut up, tracer);
+        p.write(RawEnv { up, len });
         let edges = object.as_ptr().add(ENV_SLOTS_OFFSET).cast::<CellPtr>();
-        for i in 0..len {
-            trace_cell_pointer(edges.add(i), tracer);
+        for i in 0..len as usize {
+            TraceField::trace_field(edges.add(i), tracer);
         }
     }
 }
 
 unsafe fn trace_flat_bindings(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: the header is followed by len initialized RawAttrs.
+    // SAFETY: the header is followed by len initialized RawAttrs; the header's
+    // own fields are visited through its exhaustive TraceField.
     unsafe {
+        TraceField::trace_field(object.cast::<RawBindings>().as_ptr(), tracer);
         let len = addr_of_mut!((*object.cast::<RawBindings>().as_ptr()).len).read() as usize;
         let attrs = object.as_ptr().add(FLAT_ATTRS_OFFSET).cast::<RawAttr>();
         for i in 0..len {
-            trace_cell_pointer(addr_of_mut!((*attrs.add(i)).value), tracer);
+            TraceField::trace_field(attrs.add(i), tracer);
         }
     }
 }
 
-unsafe fn trace_tree_bindings(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
-    // SAFETY: a tree's root is its only managed pointer field.
-    unsafe {
-        trace_pointer(
-            addr_of_mut!((*object.cast::<RawTreeBindings>().as_ptr()).root),
-            tracer,
-        )
-    };
-}
-
 unsafe fn trace_node(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
     // SAFETY: copy the discriminated node to a local before relocating slices.
+    // No wildcard arm: a new variant must choose its tracing here.
     unsafe {
         let p = object.cast::<RawNode>().as_ptr();
         let mut node = p.read();
         match &mut node {
-            RawNode::Leaf(attrs) => trace_slice(attrs, tracer),
+            RawNode::Leaf(attrs) => trace_in_place(attrs, tracer),
             RawNode::Inner { children, firsts } => {
-                trace_slice(children, tracer);
-                trace_slice(firsts, tracer);
+                trace_in_place(children, tracer);
+                trace_in_place(firsts, tracer);
             }
         }
         p.write(node);
@@ -547,19 +682,20 @@ unsafe fn trace_node(object: NonNull<u8>, _: usize, tracer: &mut Tracer<'_>) {
 unsafe fn trace_contexts(object: NonNull<u8>, bytes: usize, tracer: &mut Tracer<'_>) {
     // SAFETY: payload is a whole number of initialized context elements; only
     // active variants contain edges. The local copies have no destructors.
+    // No wildcard arm: a new variant must choose its tracing here.
     unsafe {
         for i in 0..bytes / size_of::<RawContext>() {
             let p = object.cast::<RawContext>().as_ptr().add(i);
             let mut context = p.read();
             match &mut context {
                 RawContext::Opaque(path) | RawContext::DrvDeep(path) | RawContext::Path(path) => {
-                    trace_slice(path, tracer)
+                    trace_in_place(path, tracer)
                 }
                 RawContext::Built { drv, output } => {
-                    trace_slice(drv, tracer);
-                    trace_slice(output, tracer);
+                    trace_in_place(drv, tracer);
+                    trace_in_place(output, tracer);
                 }
-                RawContext::LazyHash { .. } | RawContext::LazyPath(_) => {}
+                RawContext::LazyHash { offset: _, tree: _ } | RawContext::LazyPath(_) => {}
             }
             p.write(context);
         }
@@ -570,10 +706,7 @@ unsafe fn trace_attrs(object: NonNull<u8>, bytes: usize, tracer: &mut Tracer<'_>
     // SAFETY: every whole RawAttr in the payload is initialized.
     unsafe {
         for i in 0..bytes / size_of::<RawAttr>() {
-            trace_cell_pointer(
-                addr_of_mut!((*object.cast::<RawAttr>().as_ptr().add(i)).value),
-                tracer,
-            );
+            TraceField::trace_field(object.cast::<RawAttr>().as_ptr().add(i), tracer);
         }
     }
 }
@@ -582,7 +715,7 @@ unsafe fn trace_cell_edges(object: NonNull<u8>, bytes: usize, tracer: &mut Trace
     // SAFETY: every whole cell pointer in the payload is initialized.
     unsafe {
         for i in 0..bytes / size_of::<CellPtr>() {
-            trace_cell_pointer(object.cast::<CellPtr>().as_ptr().add(i), tracer);
+            TraceField::trace_field(object.cast::<CellPtr>().as_ptr().add(i), tracer);
         }
     }
 }
@@ -591,7 +724,7 @@ unsafe fn trace_node_edges(object: NonNull<u8>, bytes: usize, tracer: &mut Trace
     // SAFETY: every whole node pointer in the payload is initialized.
     unsafe {
         for i in 0..bytes / size_of::<NonNull<RawNode>>() {
-            trace_pointer(object.cast::<NonNull<RawNode>>().as_ptr().add(i), tracer);
+            TraceField::trace_field(object.cast::<NonNull<RawNode>>().as_ptr().add(i), tracer);
         }
     }
 }
@@ -633,6 +766,8 @@ mod tests {
 
     // The test builders initialize each allocation completely before the next
     // heap call. They never collect; each caller supplies the matching kind.
+    // Constructing every object through exhaustive struct literals is part of
+    // the drift defense: a new field breaks these literals as well.
     unsafe fn put<T>(heap: &mut RawHeap, kind: usize, value: T) -> NonNull<T> {
         unsafe {
             let p = heap
@@ -871,11 +1006,70 @@ mod tests {
             let elems = array(&mut heap, CELLS, &values);
             let root_list = put(&mut heap, LIST, RawList { elems });
             root.as_ptr().write(RawCell::new(RawValue::List(root_list)));
+            // Exact survivor accounting per kind, checked after each cycle: an
+            // untraced edge leaves its target dead and shrinks a kind's
+            // occupancy; a false retention inflates it. Occupancy counts each
+            // allocation's extent: variable-size kinds store a pointer-sized
+            // length prefix and round every allocation to the kind's (at least
+            // word) alignment, mirroring the raw heap's `Space::extent`.
+            fn extent(alignment: usize, bytes: usize) -> usize {
+                let alignment = alignment.max(size_of::<usize>());
+                let prefix = size_of::<usize>().next_multiple_of(alignment);
+                (bytes.max(1) + prefix).next_multiple_of(alignment)
+            }
+            let env = |len| extent(align_of::<RawEnv>(), RawEnv::layout(len).unwrap().size());
+            let expected_occupancy: [(usize, usize); 17] = [
+                (CELL, 16 * size_of::<RawCell>()),
+                (STRING, size_of::<RawStr>()),
+                (PATH, size_of::<RawPath>()),
+                (LIST, size_of::<RawList>()),
+                (APP, size_of::<RawApp>()),
+                (ENV, env(1) + env(2)),
+                (
+                    FLAT_BINDINGS,
+                    extent(
+                        align_of::<RawAttr>(),
+                        RawBindings::flat_layout(2).unwrap().size(),
+                    ),
+                ),
+                (TREE_BINDINGS, size_of::<RawTreeBindings>()),
+                (NODE, 3 * size_of::<RawNode>()),
+                (ERROR, size_of::<RawError>()),
+                (BYTES, extent(1, b"/shared/path".len())),
+                (
+                    CONTEXTS,
+                    extent(align_of::<RawContext>(), 6 * size_of::<RawContext>()),
+                ),
+                (
+                    ATTRS,
+                    extent(align_of::<RawAttr>(), 65 * size_of::<RawAttr>()),
+                ),
+                (
+                    CELLS,
+                    extent(align_of::<CellPtr>(), 16 * size_of::<CellPtr>()),
+                ),
+                (
+                    NODES,
+                    extent(
+                        align_of::<NonNull<RawNode>>(),
+                        2 * size_of::<NonNull<RawNode>>(),
+                    ),
+                ),
+                (
+                    SYMBOLS,
+                    extent(align_of::<Symbol>(), 2 * size_of::<Symbol>()),
+                ),
+                (ENV_ONE, 0),
+            ];
             for iteration in 0..3 {
                 let old_address = root.as_ptr() as usize;
                 collect(&mut heap, &mut root);
                 if iteration == 0 {
                     assert_ne!(root.as_ptr() as usize, old_address);
+                }
+                let usage = heap.space_usage();
+                for (kind, bytes) in expected_occupancy {
+                    assert_eq!(usage[kind].1, bytes, "occupancy of {}", usage[kind].0);
                 }
                 assert_eq!(Rc::strong_count(&error), 2);
                 let elems = elements(root);

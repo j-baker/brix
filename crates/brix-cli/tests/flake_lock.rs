@@ -498,6 +498,7 @@ fn build_time_inputs() {
 /// Nix always records a `ref` for a Git input: the one given, else the
 /// remote's `HEAD` branch (a bare repository is fetched like a remote),
 /// else the branch a local checkout has checked out.
+#[cfg(feature = "external-programs")]
 #[test]
 fn git_inputs_record_the_ref_nix_records() {
     let t = tempfile::tempdir().unwrap();

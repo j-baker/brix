@@ -44,6 +44,10 @@ impl LocalRaw {
     pub fn stats(&self) -> &Stats {
         &self.stats
     }
+    // barrier-audit: the parallel heap defers barriers. Mutators record dirty
+    // owners here (from `publish` and the shared `env_set`/`env_set_up`); the
+    // rendezvous in `Shared::collect` replays them into the coordinator's
+    // RawHeap before any tracing. No other code records or replays edges.
     pub fn write_barrier(&mut self, owner: NonNull<u8>) {
         self.dirty.push(owner);
     }
@@ -292,11 +296,16 @@ impl<'h> Heap<'h> {
     }
     pub fn store_blackhole(&mut self, cell: CellRoot<'_, 'h>) {
         // The owner keeps the suspension rooted; readers see the Running tag.
+        // barrier-audit: Blackhole is edgeless, so no barrier is required.
         let pointer = cell.raw.read();
         let value = unsafe { pointer.as_ref() };
         assert_eq!(value.publication.state(), State::Running(self.worker()));
         unsafe { value.value.get().write(RawValue::Blackhole) };
     }
+    // barrier-audit: the only mutator-side overwrite of a published cell in
+    // the parallel build (store/store_thunk/app_cell route here). The edge
+    // test matches the serial `publish_cell`: immediates and Blackhole cannot
+    // create an old-to-young edge, and removing an edge needs no barrier.
     pub(super) fn publish(&mut self, cell: CellRoot<'_, 'h>, value: RawValue) {
         let pointer = cell.raw.read();
         if !matches!(
@@ -359,6 +368,9 @@ impl Shared<'_> {
             self.budget.allocated.store(allocated, Ordering::Relaxed);
             return Err(error);
         }
+        // barrier-audit: not mutation sites — these replay every deferred
+        // mutator barrier (LocalRaw::write_barrier) into the collecting
+        // RawHeap after all nurseries are absorbed and before tracing.
         for pointer in first.raw.dirty.drain(..) {
             first.raw.heap.write_barrier(pointer);
         }

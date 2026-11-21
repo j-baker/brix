@@ -53,6 +53,12 @@ failed=()
 if [ "$gated_only" = 0 ]; then
   log "cargo test --workspace --no-fail-fast ${profile[*]}"
   cargo test --workspace --no-fail-fast "${profile[@]}" || failed+=("cargo test --workspace")
+  # The default build runs no external programs (`git`, `hg`, `ssh`); the
+  # tests that integrate with them need the `external-programs` feature
+  # (enabling brix-cli's enables brix's and brix-flake's too).
+  log "cargo test --workspace --no-fail-fast --features brix-cli/external-programs ${profile[*]}"
+  cargo test --workspace --no-fail-fast --features brix-cli/external-programs "${profile[@]}" \
+    || failed+=("cargo test --workspace --features brix-cli/external-programs")
 fi
 
 # The gated tests, one line per test: `<crate> <test file> <variable> <name>`.

@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "A bug-for-bug compatible Nix evaluator: the library facade"
 
+[features]
+# Fetching that runs external programs (`git`, `hg`, `ssh`), as Nix runs
+# them; see brix-flake's feature of the same name. Off by default: brix
+# then spawns nothing and fetches Git over http(s) and git:// in-process.
+external-programs = ["brix-flake/external-programs"]
+
 [dependencies]
 brix-syntax.workspace = true
 # The real file system (`FsAccessor`): local flakes, the store directory.

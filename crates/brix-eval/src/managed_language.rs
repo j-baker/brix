@@ -124,6 +124,9 @@ pub(crate) struct Language<'a> {
     // immutable snapshot instead of taking the table's (contended) read lock.
     #[cfg(brix_parallel)]
     primop_table: Published<'a, &'a [Primop<'a>]>,
+    /// Dense IDs per permanent legacy primop, keyed by its arena address: the
+    /// bump arena neither moves nor frees while `'a` lives, and the parallel
+    /// build shares this map across workers, so the key must be an integer.
     primop_ids: RefCell<HashMap<usize, usize>>,
     callbacks: RefCell<HashMap<String, Rc<crate::managed_api::Callback<'a>>>>,
     #[cfg(brix_parallel)]
@@ -514,7 +517,7 @@ impl<'a> Language<'a> {
 
     fn primop_id(&self, p: &'a crate::value::PrimOp<'a>) -> usize {
         let _metadata = self.legacy.metadata_gate.lock();
-        let key = p as *const _ as usize;
+        let key = std::ptr::from_ref(p).addr();
         if let Some(&id) = self.primop_ids.borrow().get(&key) {
             return id;
         }
@@ -2574,16 +2577,18 @@ impl Code for Language<'_> {
 
 /// Bootstrap only: copy the evaluator's permanent initial graph without
 /// forcing anything. Memoized cells/frames preserve cycles and sharing.
+/// The memo keys are legacy-arena addresses, which never move or get reused
+/// while the `'a` borrow lives; the rooted values follow heap relocation.
 struct Importer<'l, 'a, 'm, 'r, 'h> {
     language: &'l Language<'a>,
     machine: &'m mut Machine<'h>,
     roots: &'m Roots<'r, 'h>,
-    cells: HashMap<usize, CellRoot<'r, 'h>>,
-    envs: HashMap<usize, EnvRoot<'r, 'h>>,
+    cells: HashMap<*const (), CellRoot<'r, 'h>>,
+    envs: HashMap<*const (), EnvRoot<'r, 'h>>,
 }
 impl<'a, 'r, 'h> Importer<'_, 'a, '_, 'r, 'h> {
     fn cell(&mut self, old: ValueRef<'a>) -> Result<CellRoot<'r, 'h>> {
-        let key = old as *const _ as usize;
+        let key = std::ptr::from_ref(old).cast::<()>();
         if let Some(cell) = self.cells.get(&key) {
             return Ok(*cell);
         }
@@ -2594,7 +2599,7 @@ impl<'a, 'r, 'h> Importer<'_, 'a, '_, 'r, 'h> {
         Ok(cell)
     }
     fn env(&mut self, old: Env<'a>) -> Result<EnvRoot<'r, 'h>> {
-        let key = old.slots().as_ptr() as usize;
+        let key = old.slots().as_ptr().cast::<()>();
         if let Some(env) = self.envs.get(&key) {
             return Ok(*env);
         }

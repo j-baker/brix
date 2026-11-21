@@ -9,6 +9,11 @@
 //! Both programs run git with no user or system configuration, and with
 //! a `TMPDIR` of the test's, whose `nix.XXXXXX` files (the allowed-signers
 //! file git's output can name) are masked.
+//!
+//! Verification runs `git`, so everything here needs brix built with the
+//! `external-programs` feature; without it brix refuses, which
+//! `native::git_verify::refusal_tests` covers in brix-flake.
+#![cfg(feature = "external-programs")]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

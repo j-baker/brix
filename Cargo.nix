@@ -822,7 +822,10 @@ rec {
             packageId = "tempfile";
           }
         ];
-
+        features = {
+          "external-programs" = [ "brix-flake/external-programs" ];
+        };
+        resolvedDefaultFeatures = [ "external-programs" ];
       };
       "brix-alloc" = rec {
         crateName = "brix-alloc";
@@ -968,7 +971,10 @@ rec {
             features = [ "ring" "std" ];
           }
         ];
-
+        features = {
+          "external-programs" = [ "brix/external-programs" "brix-flake/external-programs" ];
+        };
+        resolvedDefaultFeatures = [ "external-programs" ];
       };
       "brix-cli-parallel" = rec {
         crateName = "brix-cli-parallel";
@@ -1520,9 +1526,10 @@ rec {
         ];
         features = {
           "default" = [ "native" ];
+          "external-programs" = [ "native" ];
           "native" = [ "dep:ureq" "dep:tar" "dep:flate2" "dep:xz2" "dep:bzip2" "dep:zstd" "dep:zip" "dep:gix" "dep:gix-transport" "dep:jiff" "dep:rustix" "dep:tempfile" "brix-store/std-fs" ];
         };
-        resolvedDefaultFeatures = [ "default" "native" ];
+        resolvedDefaultFeatures = [ "default" "external-programs" "native" ];
       };
       "brix-gc" = rec {
         crateName = "brix-gc";

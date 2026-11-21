@@ -11,6 +11,11 @@
 //! fetch reports depends on what that cache holds, so both are taken
 //! through the same steps. The reference `nix` writes into a store of its
 //! own (a chroot store in the test's directory), brix into none.
+//!
+//! Mercurial fetching runs `hg`, so everything here needs brix built with
+//! the `external-programs` feature; without it brix refuses, which
+//! `native::mercurial::refusal_tests` covers in brix-flake.
+#![cfg(feature = "external-programs")]
 
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;

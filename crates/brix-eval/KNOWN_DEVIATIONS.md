@@ -242,15 +242,41 @@ differences:
   as its checkout's directory when the repository is local, where Nix
   shows it as its input (`«git+file:///…?rev=…»/flake.nix`).
 
-### Remote Git repositories without `git`
+### Remote Git repositories and the `git` binary
 
-Nix asks a repository to fetch from with `git`, and so does brix. With
-no `git` on `PATH`, Nix fetches with libgit2, and its `git ls-remote`
-for the remote's `HEAD` fails (`error: executing "git": No such file or
-directory`, then the warning that it uses `master`); brix falls back to
-gix, which reads the remote's `HEAD` (and when it cannot, brix warns
-with gix's error), and a failed fetch is reported with gix's message
-where Nix gives libgit2's (`fetching '<refspec>' from '<url>': …`).
+Everything below needs brix built with the `external-programs` cargo
+feature, which is off by default. A default build runs no external
+programs at all: Git over `ssh://`, a bare `file://` remote and
+`ftp(s)://`, Mercurial inputs, Nix 2.19 exports (`nix-219-compat`),
+commit signature verification and Git LFS over ssh each fail with an
+error naming the feature, where Nix would run `git`, `hg` or `ssh`.
+Git over `http(s)://` and `git://`, and every other fetcher, work the
+same in both builds.
+
+Nix asks a repository to fetch from with `git` whenever one is on
+`PATH` (`git ls-remote --symref` for its `HEAD`, `git fetch`, `git
+symbolic-ref` for the `HEAD` the clone remembers), and fetches with
+libgit2 only without one. brix runs `git` only for a URL whose
+transport it cannot speak in-process — `ssh://` (and SCP-style URLs),
+`file://` remotes, `ftp(s)://` — where git's messages, credentials and
+protocols are Nix's. `http(s)://` and `git://` repositories it always
+fetches in-process with gix, over brix's own HTTP client, as Nix does
+only without `git`. For them:
+
+- TLS trusts `ssl-cert-file` (as brix's downloads do), not git's
+  configuration; authentication is netrc's basic auth, and git's
+  credential helpers and `http.*` configuration do not apply.
+- What `git` would print (its progress, its `fatal:` lines) is absent,
+  and a failure is reported with gix's message where Nix passes on
+  git's and says `Failed to fetch git repository '<url>'`.
+
+With no `git` on `PATH` at all, Nix's `git ls-remote` for the remote's
+`HEAD` fails (`error: executing "git": No such file or directory`, then
+the warning that it uses `master`); brix falls back to gix for every
+transport, which reads the remote's `HEAD` (and when it cannot, brix
+warns with gix's error), and a failed fetch is reported with gix's
+message where Nix gives libgit2's (`fetching '<refspec>' from '<url>':
+…`).
 
 ### Fetching ahead
 

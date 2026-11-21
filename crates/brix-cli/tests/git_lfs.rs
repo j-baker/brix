@@ -277,6 +277,7 @@ fn lfs_without_a_remote_matches_nix() {
 /// `ssh … git-lfs-authenticate <path> download`, run by a stand-in `ssh`
 /// that records its arguments; a relative SCP-style path is warned
 /// about.
+#[cfg(feature = "external-programs")]
 #[test]
 fn lfs_over_ssh_matches_nix() {
     let lfs = Lfs::new(LfsMode::Objects);

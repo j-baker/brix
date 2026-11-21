@@ -16,7 +16,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use assert_cmd::prelude::*;
-use brix_testutil::{git, is_noise, GitRepo, Oracle, ORACLE_NIX_CONFIG};
+#[cfg(feature = "external-programs")]
+use brix_testutil::GitRepo;
+use brix_testutil::{git, is_noise, Oracle, ORACLE_NIX_CONFIG};
 
 /// The configuration both programs get on top of the oracle's pinned
 /// one: no global flake registry (it would be downloaded) and no
@@ -323,6 +325,7 @@ fn locking_a_submodules_input_matches_nix() {
 /// `exportIgnore` and `submodules` set together, and a relative
 /// submodule of a repository fetched by its `file://` URL, which libgit2
 /// resolves to an invalid URL: Nix's errors.
+#[cfg(feature = "external-programs")]
 #[test]
 fn submodule_errors_match_nix() {
     let scratch = Scratch::new();
@@ -371,6 +374,7 @@ fn submodule_errors_match_nix() {
 }
 
 /// The files of `call`'s tree, recursively, and its NAR hash.
+#[cfg(feature = "external-programs")]
 fn listing(call: &str) -> String {
     format!(
         r#"let t = {call}; ls = d: builtins.mapAttrs (n: v: if v == "directory" then ls (d + "/${{n}}") else v) (builtins.readDir d); in {{ files = ls t.outPath; narHash = t.narHash; }}"#
@@ -382,6 +386,7 @@ fn listing(call: &str) -> String {
 /// a path pattern, a value (which git does not count), an unset one, a
 /// nested `.gitattributes`, and `export-subst`, which only `git archive`
 /// applies.
+#[cfg(feature = "external-programs")]
 fn export_ignore_repo() -> (GitRepo, String) {
     let repo = GitRepo::new();
     repo.write(
@@ -419,6 +424,7 @@ fn export_ignore_repo() -> (GitRepo, String) {
 /// and in a working tree (as a flake); reading a hidden file; and the
 /// attributes of a checkout's working tree applying to its commits, as
 /// libgit2 reads them.
+#[cfg(feature = "external-programs")]
 #[test]
 fn export_ignore_matches_nix() {
     let scratch = Scratch::new();
@@ -486,6 +492,7 @@ fn export_ignore_matches_nix() {
 
 /// `nix-219-compat`: a commit exported by `git archive`, announced, and
 /// fingerprinted as `;e;legacy`; a working tree is read as ever.
+#[cfg(feature = "external-programs")]
 #[test]
 fn nix_219_compat_matches_nix() {
     let scratch = Scratch::new();
@@ -528,6 +535,7 @@ fn nix_219_compat_matches_nix() {
 /// A lock made with `nix-219-compat` holds the `narHash` of `git
 /// archive`'s tree: without it, Nix tries that export after its own,
 /// takes it, and says to update the hash; with it, the other way round.
+#[cfg(feature = "external-programs")]
 #[test]
 fn nar_hashes_of_the_other_export_match_nix() {
     let scratch = Scratch::new();
@@ -702,6 +710,7 @@ fn submodule_urls_follow_insteadof_like_nix() {
 /// `--recurse-submodules`) is an empty directory, which Nix takes for a
 /// repository to fetch from: `git` says it is none, twice in each of two
 /// tries, and the fetch fails.
+#[cfg(feature = "external-programs")]
 #[test]
 fn missing_submodule_checkouts_fail_like_nix() {
     let scratch = Scratch::new();
@@ -790,9 +799,11 @@ fn failing_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) 
 
 /// A remote Git repository whose server fails: without a `ref` Nix asks
 /// it for its `HEAD` in each of its two tries, then fetches, three
-/// requests in all (one with a `ref`). brix asks as often, and stderr is
-/// the same: what the `git` both run says each time, the warnings about
-/// the `HEAD` they could not read, the error.
+/// requests in all (one with a `ref`). brix asks as often, but over its
+/// own HTTP client where Nix runs `git` (see KNOWN_DEVIATIONS.md,
+/// "Remote Git repositories and the `git` binary"): the warnings about
+/// the `HEAD` it could not read and the error carry gix's message, not
+/// git's `fatal:` lines.
 #[test]
 fn a_failing_git_server_is_asked_as_often_as_by_nix() {
     use std::sync::atomic::Ordering;
@@ -814,27 +825,28 @@ fn a_failing_git_server_is_asked_as_often_as_by_nix() {
         assert_ne!(theirs.status, 0, "nix succeeded: {theirs:?}");
         assert_eq!(asked_by_nix, requests, "{attrs}: {theirs:?}");
         assert_eq!(asked_by_brix, asked_by_nix, "{attrs}: {ours:?}");
-        assert_eq!(
-            ours, theirs,
-            "brix (left) and nix (right) differ for {attrs:?}"
-        );
+        assert_eq!(ours.status, theirs.status, "{attrs}: {ours:?}");
+        let gix_says = "An IO error occurred when talking to the server: Received HTTP status 500";
         assert_eq!(
             ours.error,
-            Some(format!("error: Failed to fetch git repository '{url}/r'"))
+            Some(format!("error: preparing fetch from '{url}/r': {gix_says}"))
         );
-        let fatal =
-            format!("fatal: unable to access '{url}/r/': The requested URL returned error: 500\n");
+        let heads = format!(
+            "warning: listing the references of '{url}/r': {gix_says}\nwarning: could not read HEAD ref from repo at '{url}/r', using 'master'\n"
+        );
         let stderr = ours.stderr.as_deref().unwrap_or_default();
-        assert_eq!(stderr.matches(&fatal).count(), requests, "{stderr}");
+        let asked_for_head = if attrs.is_empty() { 2 } else { 0 };
+        assert_eq!(stderr.matches(&heads).count(), asked_for_head, "{stderr}");
     }
 }
 
-/// A remote Git repository on a host that refuses connections fails as
-/// in Nix, with what `git` says about each attempt. curl, which git uses,
-/// says how long it tried to connect ("after 0 ms"), which is the one
-/// thing that may differ.
+/// A remote Git repository on a host that refuses connections: the two
+/// warnings about the `HEAD` brix could not read (none with a `ref`) and
+/// the error, each with gix's message. (Nix runs `git`, whose curl
+/// output brix no longer reproduces for `http(s)`: see
+/// KNOWN_DEVIATIONS.md, "Remote Git repositories and the `git` binary".)
 #[test]
-fn a_git_host_refusing_connections_fails_like_nix() {
+fn a_git_host_refusing_connections_fails_with_gix_message() {
     // Nothing listens on a privileged port of the loopback interface.
     let url = "http://127.0.0.1:1/r";
     let scratch = Scratch::new();
@@ -844,23 +856,22 @@ fn a_git_host_refusing_connections_fails_like_nix() {
             r#"(builtins.fetchTree {{ type = "git"; url = "{url}"; rev = "{rev}";{attrs} }}).narHash"#
         );
         let args = ["eval", "--json", "--expr", &expr];
-        let theirs = without_connect_times(scratch.run(Side::Nix, scratch.path(), &args));
-        let ours = without_connect_times(scratch.run(Side::Brix, scratch.path(), &args));
-        assert_ne!(theirs.status, 0, "nix succeeded: {theirs:?}");
-        assert_eq!(
-            ours, theirs,
-            "brix (left) and nix (right) differ for {attrs:?}"
-        );
-        assert_eq!(
-            ours.error,
-            Some(format!("error: Failed to fetch git repository '{url}'"))
+        let ours = scratch.run(Side::Brix, scratch.path(), &args);
+        assert_eq!(ours.status, 1, "{ours:?}");
+        // "Connection refused (os error 111)" on Linux; the number is the
+        // platform's.
+        let error = ours.error.as_deref().unwrap_or_default();
+        assert!(
+            error.starts_with(&format!(
+                "error: preparing fetch from '{url}': An IO error occurred when talking to the server: io: Connection refused"
+            )),
+            "{error}"
         );
         let stderr = ours.stderr.as_deref().unwrap_or_default();
-        let fatal = format!(
-            "fatal: unable to access '{url}/': Failed to connect to 127.0.0.1:1 after N ms: Could not connect to server\n"
-        );
-        let attempts = if attrs.is_empty() { 3 } else { 1 };
-        assert_eq!(stderr.matches(&fatal).count(), attempts, "{stderr}");
+        let head_warning =
+            format!("warning: could not read HEAD ref from repo at '{url}', using 'master'\n");
+        let attempts = if attrs.is_empty() { 2 } else { 0 };
+        assert_eq!(stderr.matches(&head_warning).count(), attempts, "{stderr}");
     }
 }
 
@@ -869,6 +880,7 @@ fn a_git_host_refusing_connections_fails_like_nix() {
 /// the remote is gone, its failure is reported (git's messages, Nix's
 /// error and warning) and the clone's version taken. Both programs keep
 /// their own cache from step to step.
+#[cfg(feature = "external-programs")]
 #[test]
 fn a_failed_fetch_of_a_ref_the_clone_has_is_got_past_like_nix() {
     let scratch = Scratch::new();
@@ -927,27 +939,4 @@ fn a_failed_fetch_of_a_ref_the_clone_has_is_got_past_like_nix() {
         "error: Failed to fetch git repository '{remote}'\nwarning: could not update local clone of Git repository '{remote}'; continuing with the most recent version\n"
     );
     assert!(stderr.ends_with(&reported), "{stderr}");
-}
-
-/// `outcome` with the times curl reports for a failed connection ("Failed
-/// to connect to … after 3 ms") replaced by `N`.
-fn without_connect_times(mut outcome: Outcome) -> Outcome {
-    outcome.stderr = outcome.stderr.map(|stderr| {
-        let mut out = String::new();
-        let mut rest = stderr.as_str();
-        while let Some(at) = rest.find(" after ") {
-            let (head, tail) = rest.split_at(at + " after ".len());
-            out.push_str(head);
-            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-            if digits > 0 && tail[digits..].starts_with(" ms") {
-                out.push('N');
-                rest = &tail[digits..];
-            } else {
-                rest = tail;
-            }
-        }
-        out.push_str(rest);
-        out
-    });
-    outcome
 }

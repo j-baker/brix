@@ -29,6 +29,7 @@
 #[cfg(brix_parallel)]
 mod batch;
 mod callflake;
+pub mod check;
 #[cfg(brix_parallel)]
 pub use batch::{BatchContext, BatchCursor, BatchValue};
 pub mod compiled;

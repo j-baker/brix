@@ -913,9 +913,12 @@ mod tests {
                         .into_iter()
                         .chain(leaves(heap, roots, tree_root(heap, roots, right)))
                         .collect();
-                    let before = heap.space_usage()[crate::heap_layout::ATTRS].1;
+                    let before = heap.space_usage()[crate::managed_heap::heap_layout::ATTRS].1;
                     let merged = update(heap, roots, left, right).unwrap();
-                    assert_eq!(heap.space_usage()[crate::heap_layout::ATTRS].1, before);
+                    assert_eq!(
+                        heap.space_usage()[crate::managed_heap::heap_layout::ATTRS].1,
+                        before
+                    );
                     let output = leaves(heap, roots, tree_root(heap, roots, merged));
                     assert_eq!(output.len(), original.len());
                     assert!(original
@@ -923,7 +926,10 @@ mod tests {
                         .zip(&output)
                         .all(|(&a, &b)| heap.same_node(a, b)));
                     let identical = update(heap, roots, merged, merged).unwrap();
-                    assert_eq!(heap.space_usage()[crate::heap_layout::ATTRS].1, before);
+                    assert_eq!(
+                        heap.space_usage()[crate::managed_heap::heap_layout::ATTRS].1,
+                        before
+                    );
                     let again = leaves(heap, roots, tree_root(heap, roots, identical));
                     assert!(output
                         .iter()

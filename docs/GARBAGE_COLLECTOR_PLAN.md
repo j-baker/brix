@@ -106,6 +106,54 @@ leaves no avoidable gaps, fully live packed slabs require no compaction,
 minor collections do not retrace unchanged old graphs, and major-budget
 backoff resets after substantial reclamation.
 
+### Compile-time containment of the integration contract (2026-11-14)
+
+The riskiest GC bugs are integration bugs: a missed root on a rare path, a
+missed write barrier on a new mutation site, or a descriptor that drifts from
+a layout change. These cannot be proven from inside `brix-gc`; they are now
+blocked structurally in `brix-eval` where the type system can express it, and
+checked by a source lint where it cannot:
+
+* **Module wall.** `heap_layout` is a private child of `managed_heap`
+  (`managed_bindings` moved inside the wall too, re-exported at its old crate
+  path). Raw heap pointer types are unnameable elsewhere in the crate, so code
+  outside the wall can only hold rooted handles or heap-borrowing views —
+  holding an unrooted reference across a collection is a compile error, not a
+  discipline.
+* **Descriptor drift defense.** Every field of a traced layout is visited
+  through a per-field-type `TraceField` implementation, struct tracers
+  destructure their layout with no `..`, and enum tracers have no wildcard
+  arm: adding a field or variant fails to compile until its tracing behavior
+  is chosen explicitly. No-edge scalar types are listed individually with the
+  reason; there is no blanket no-op. The root registry's slice descriptors
+  delegate to the same implementation. The layout test additionally asserts
+  exact per-kind survivor occupancy after each collection, so an untraced
+  edge (dead target) or false retention fails even if content checks miss it.
+* **Opaque identity.** `Identity<'v>` lives in `managed_heap/identity.rs` and
+  its address field is private to that file. Within a heap borrow it is
+  compared directly (collection is excluded by the borrow). Stored cache keys
+  are opaque `AddressTag`s kept inside `EpochGated` containers whose only
+  accessors require the current `Epoch`; comparing a stale address without
+  the epoch check is unwritable in safe code. Legacy-arena memo keys (the
+  bootstrap importer, primop IDs) are exempt because that arena never moves.
+* **Barrier funnel.** The serial heap overwrites published cells only through
+  `publish_cell`, which records the old-to-young edge unless the new value is
+  edgeless; `env_set`/`env_set_up` are the two audited environment writers.
+  The parallel heap's `publish` and its rendezvous barrier replay are tagged
+  as the complete parallel surface.
+* **Source lint** (`brix-eval/tests/source_lint.rs`). Scans the moving-heap
+  subtree: `write_barrier` may appear only in the audited funnel files, and
+  address-to-integer derivation (`as usize` on pointers, `.addr()`,
+  `expose_provenance`) only in the weak sets, the identity module, and the
+  documented legacy-arena exemptions. New sites fail CI with the review
+  instructions.
+
+What this does not cover: the unsafe core upholding its own invariants
+(Miri/stress/test territory), extent arithmetic for variable-sized layouts
+(exercised by the occupancy assertions and sentinel tests), and the
+`RootKind::Stored` associated types, which can still be *denoted* outside the
+wall though no value can be constructed or read there.
+
 ### CLI performance investigation (2026-11-10)
 
 The acceptance workload is `target/release/brix flake show ~/git/nix`, compared

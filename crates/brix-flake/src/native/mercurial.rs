@@ -40,7 +40,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::Bound;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::Command;
+#[cfg(feature = "external-programs")]
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -564,6 +566,20 @@ fn run_hg(cmd: &mut Command) -> Result<String> {
 /// and so does brix's. Both it and `hg`'s stderr go where
 /// [`super::stderr`] sends them.
 fn run_program(cmd: &mut Command) -> Result<(Status, String)> {
+    #[cfg(not(feature = "external-programs"))]
+    {
+        let _ = &cmd;
+        Err(err!(
+            "Mercurial support runs `hg`, which this build of brix does not: it was built without the `external-programs` feature"
+        ))
+    }
+    #[cfg(feature = "external-programs")]
+    run_program_in(cmd)
+}
+
+/// [`run_program`], with the `external-programs` feature.
+#[cfg(feature = "external-programs")]
+fn run_program_in(cmd: &mut Command) -> Result<(Status, String)> {
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
         .stderr(super::stderr::for_program());
@@ -593,6 +609,9 @@ fn run_program(cmd: &mut Command) -> Result<(Status, String)> {
 }
 
 /// How a program ended (the `status` Nix's `runProgram` returns).
+/// Without the `external-programs` feature no program runs, so nothing
+/// constructs one, but [`run_hg`] still reads it.
+#[cfg_attr(not(feature = "external-programs"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Exited(i32),
@@ -601,6 +620,7 @@ enum Status {
 }
 
 impl Status {
+    #[cfg(feature = "external-programs")]
     fn of(status: ExitStatus) -> Status {
         if let Some(code) = status.code() {
             return Status::Exited(code);
@@ -680,7 +700,35 @@ fn signal_description(signal: i32) -> String {
     }
 }
 
-#[cfg(test)]
+/// Without the `external-programs` feature Mercurial inputs fail before
+/// `hg` would run.
+#[cfg(all(test, not(feature = "external-programs")))]
+mod refusal_tests {
+    use super::*;
+    use brix_testutil::HgRepo;
+
+    #[test]
+    fn mercurial_needs_the_external_programs_feature() {
+        let repo = HgRepo::new();
+        let fetcher = NativeFetcher::new()
+            .unwrap()
+            .with_cache_dir(repo.scratch().join("cache"));
+        let settings = FetchSettings::default();
+        let input = Input::from_url_str(
+            &settings,
+            &format!("hg+file://{}?ref=default", repo.path().display()),
+            true,
+        )
+        .unwrap();
+        let err = fetch(&fetcher, &settings, &input).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Mercurial support runs `hg`, which this build of brix does not: it was built without the `external-programs` feature"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "external-programs"))]
 mod tests {
     use super::*;
     use crate::fetch::fetch_input;

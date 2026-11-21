@@ -34,14 +34,18 @@
 //! only smudges exported commits.
 
 use std::collections::HashMap;
+#[cfg(feature = "external-programs")]
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use brix_store::accessor::{AccessorError, DirEntries, FileType, SourceAccessor, Stat};
+#[cfg(feature = "external-programs")]
 use brix_store::shell::escape_shell_arg_always;
-use brix_store::url::{parse_url, Authority, ParsedUrl};
+#[cfg(feature = "external-programs")]
+use brix_store::url::Authority;
+use brix_store::url::{parse_url, ParsedUrl};
 use brix_store::{BStr, BString, CanonPath, Hash, HashAlgo, HashFormat};
 use gix::bstr::ByteSlice;
 use serde_json::Value;
@@ -438,6 +442,15 @@ impl Fetch {
             ));
         };
         if self.url.scheme == "ssh" {
+            #[cfg(not(feature = "external-programs"))]
+            {
+                let _ = authority;
+                return Err(err!(
+                    "finding the Git LFS server of '{}' runs `ssh`, which this build of brix does not: it was built without the `external-programs` feature",
+                    self.url
+                ));
+            }
+            #[cfg(feature = "external-programs")]
             return git_lfs_authenticate(&self.url, authority);
         }
         Ok(LfsApi {
@@ -583,6 +596,7 @@ fn http_endpoint(url: &ParsedUrl) -> String {
 /// -- git-lfs-authenticate <path> download` prints the endpoint (`href`)
 /// and the `Authorization` header to send it. Its exit status is not
 /// looked at, only its output.
+#[cfg(feature = "external-programs")]
 fn git_lfs_authenticate(url: &ParsedUrl, authority: &Authority) -> Result<LfsApi> {
     let mut args =
         brix_store::shell::nix_ssh_opts().map_err(|e| err!("{}", e.message).trace(e.trace))?;
@@ -649,6 +663,7 @@ fn git_lfs_authenticate(url: &ParsedUrl, authority: &Authority) -> Result<LfsApi
 }
 
 /// `strerror` of an I/O error: its text without Rust's `(os error N)`.
+#[cfg(feature = "external-programs")]
 fn strerror(e: &std::io::Error) -> String {
     let text = e.to_string();
     match e.raw_os_error() {
@@ -831,7 +846,11 @@ fn dump(value: &Value) -> String {
 mod tests {
     use super::*;
     use crate::fetch::{tree_nar_hash, FetchedTree};
-    use brix_testutil::{git, GitRepo, LfsMode, LfsServer, LFS_AUTHORIZATION};
+    #[cfg(not(feature = "external-programs"))]
+    use brix_store::url::Authority;
+    #[cfg(feature = "external-programs")]
+    use brix_testutil::git;
+    use brix_testutil::{GitRepo, LfsMode, LfsServer, LFS_AUTHORIZATION};
 
     fn p(s: &str) -> CanonPath {
         CanonPath::new(s).unwrap()
@@ -1267,6 +1286,7 @@ mod tests {
 
     /// A clone's remote is the URL it was fetched from: for a bare
     /// repository on disk a `file:` URL, which cannot be posted to.
+    #[cfg(feature = "external-programs")]
     #[test]
     fn a_clone_asks_the_url_it_was_fetched_from() {
         let server = LfsServer::start(objects(), LfsMode::Objects);

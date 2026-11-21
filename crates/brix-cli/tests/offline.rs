@@ -31,7 +31,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
-use brix_testutil::{git, is_noise, GitRepo, Oracle, ORACLE_NIX_CONFIG};
+#[cfg(feature = "external-programs")]
+use brix_testutil::{git, GitRepo};
+use brix_testutil::{is_noise, Oracle, ORACLE_NIX_CONFIG};
 
 /// What a run printed.
 #[derive(Debug, PartialEq, Eq)]
@@ -768,6 +770,7 @@ fn inputs_fetched_ahead_say_nothing_until_needed() {
 /// for the inputs evaluation needs, in the order evaluation needs them,
 /// byte for byte as under Nix, though brix fetches the other input in the
 /// background.
+#[cfg(feature = "external-programs")]
 #[test]
 fn git_inputs_fetched_ahead_say_nothing_until_needed() {
     let env = Env::new("");

@@ -11,6 +11,13 @@ description = "The brix command line: the nix CLI, evaluated by brix and built b
 name = "brix"
 path = "src/main.rs"
 
+[features]
+# Fetching that runs external programs (`git`, `hg`, `ssh`), as Nix runs
+# them; see brix-flake's feature of the same name. Off by default: the
+# brix binary then spawns nothing and fetches Git over http(s) and git://
+# in-process.
+external-programs = ["brix/external-programs", "brix-flake/external-programs"]
+
 [dependencies]
 brix-cli-parallel = { path = "../brix-cli-parallel" }
 brix.workspace = true

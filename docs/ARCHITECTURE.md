@@ -314,30 +314,43 @@ file against the fetched content.
 
 All HTTP goes through one client (`native/http.rs`, on `ureq`): tarball
 and file downloads, the Git LFS batch API (a POST) and its downloads,
-and, when there is no `git` to run (see below), Git's smart HTTP
-protocol, for which gix is given a transport backend on the same client
-(`native/git_http.rs`; gix's own backends, curl and reqwest, are not
-built). It trusts the CA certificates Nix's `ssl-cert-file` names, and
-only those, as curl does for Nix. Downloads (not Git fetches, which Nix
-leaves to `git`) give up connecting after `connect-timeout` seconds and
+and Git's smart HTTP protocol, for which gix is given a transport
+backend on the same client (`native/git_http.rs`; gix's own backends,
+curl and reqwest, are not built). It trusts the CA certificates Nix's
+`ssl-cert-file` names, and only those, as curl does for Nix. Downloads
+(not Git fetches) give up connecting after `connect-timeout` seconds and
 are tried `filetransfer-retry-attempts` times.
 
-Git itself is gix, with two exceptions, both Nix's. A repository to
-fetch from (any URL but a local checkout's) is asked with `git` when it
-is on `PATH`, as Nix asks it: `git ls-remote --symref` for its `HEAD`,
-`git fetch --progress --force [--depth 1] -- <url> <refspec>` into the
-bare clone, `git symbolic-ref` for the `HEAD` the clone remembers, with
-brix's environment, stdin and stderr, so that what git prints (a server's
-failure, its progress) and how it connects, authenticates and trusts
-certificates (its own configuration, not `ssl-cert-file`) are Nix's.
-The refspecs are Nix's too (a revision goes to
+Everything that runs an external program is behind brix-flake's
+`external-programs` cargo feature (brix and brix-cli pass it through),
+which is off by default: a default build spawns no processes at all, and
+what would need one — Git over `ssh://`, a bare `file://` remote or
+`ftp(s)://`, Mercurial inputs, Nix 2.19 exports, commit signature
+verification, Git LFS over ssh — fails with an error naming the feature.
+Git over `http(s)://` and `git://`, and every other fetcher, work either
+way.
+
+Git itself is gix, with two exceptions, both behind `external-programs`.
+A repository to fetch from over a transport brix cannot speak in-process
+— `ssh://`, a `file://` remote, `ftp(s)://`, but not `http(s)://` or
+`git://`, which are always fetched with gix (`fetches_with_git` in
+`native/git.rs`, a deviation from Nix: see KNOWN_DEVIATIONS.md) — is
+asked with `git` when it is on `PATH`, as Nix asks it: `git ls-remote
+--symref` for its `HEAD`, `git fetch --progress --force [--depth 1] --
+<url> <refspec>` into the bare clone, `git symbolic-ref` for the `HEAD`
+the clone remembers, with brix's environment, stdin and stderr, so that
+what git prints (a server's failure, its progress) and how it connects,
+authenticates and trusts certificates (its own configuration, not
+`ssl-cert-file`) are Nix's.
+The refspecs are Nix's in either case (a revision goes to
 `refs/__nix_internal_fetchers_48ae34d6b380c5ec__/tip-<xx>`), and so are
 the rules around the fetch: a ref whose file in the clone is younger
 than `tarball-ttl` is not fetched again, whichever input names it; when
 fetching a ref the clone has fails, the error is logged (the fetch
 settings' `error` sink, Nix's `logError`) and the clone's version taken
-with a warning. Without `git`, Nix fetches with libgit2 and brix with
-gix, whose messages are their own. And a commit whose signature an input asks to
+with a warning. Where `git` is not run (Nix: no `git` on `PATH`; brix:
+also every `http(s)` and `git` URL), Nix fetches with libgit2 and brix
+with gix, whose messages are their own. And a commit whose signature an input asks to
 verify (`verifyCommit`, `publicKey`, `publicKeys`) is checked by running
 `git verify-commit` against an allowed-signers file, as Nix does
 (`native/git_verify.rs`), so `git` and `ssh-keygen` must be on `PATH`
@@ -486,7 +499,11 @@ system at all, such as wasm, builds on brix-eval and brix-flake (without
   `derivation_json` (`nix derivation show`'s JSON read back, for
   `derivation add`), `nixconf` (`nix.conf` and Nix's setting parsers),
   `schemas` (flake schemas evaluated and their inventory read, for
-  whoever resolves installables or walks outputs) and `log` (stderr as
+  whoever resolves installables or walks outputs), `check` (`nix flake
+  check`'s walk over those schemas: every output evaluated, each check
+  reported to a callback as it finishes, and the derivations to build
+  returned, unbuilt, for the caller to build then or hand on) and `log`
+  (stderr as
   Nix's logger writes it, with the `Logger` a program installs in place
   of plain stderr, Nix's global `logger`).
 
@@ -495,8 +512,8 @@ inventory of the real `nix` CLI (`tree.rs`, `args.rs`) and a module per
 command group, plus the presentation the facade leaves to it:
 installables and their resolution through the schemas for a command's
 roles (`installable.rs`), the JSON documents of `derivation show` and
-`flake metadata --json` (`output.rs`), `flake show`'s inventory and
-`flake check`'s walk (`schemas.rs`) and the progress bar (`progress.rs`).
+`flake metadata --json` (`output.rs`), `flake show`'s inventory
+(`schemas.rs`) and the progress bar (`progress.rs`).
 
 `brix-cli` uses no argument-parsing library. Its command tree is data:
 `data/nix-cli-tree.json` is the reference `nix __dump-cli` with the

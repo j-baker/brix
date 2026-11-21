@@ -1,14 +1,16 @@
 //! Bounded lookup memoisation for immutable published attribute sets.
 //!
-//! Entries do not retain their sets or cells. GC epochs invalidate every entry
-//! before an address can be moved or reused, and returned views borrow the heap.
+//! Entries do not retain their sets or cells. The epoch gate invalidates every
+//! entry before an address can be moved or reused, and returned views borrow
+//! the heap. Addresses are handled only as opaque `identity` tags.
+use super::identity::{AddressTag, EpochGated};
 use super::*;
 
 const SLOTS: usize = 4096;
 
 #[derive(Clone, Copy)]
 struct Entry {
-    address: usize,
+    tag: AddressTag,
     value: Option<CellPtr>,
     name: Symbol,
     pos: SrcPos,
@@ -16,7 +18,7 @@ struct Entry {
 
 impl Entry {
     const EMPTY: Self = Self {
-        address: 0,
+        tag: AddressTag::EMPTY,
         value: None,
         name: Symbol(0),
         pos: SrcPos::NONE,
@@ -33,15 +35,7 @@ impl Entry {
 
 #[derive(Default)]
 pub(super) struct AttributeCache {
-    collection: usize,
-    entries: Vec<Entry>,
-}
-
-#[inline]
-fn slot(address: usize, name: Symbol, mask: usize) -> usize {
-    let mixed =
-        (address >> 3).wrapping_mul(0x9e3779b9) ^ (name.0 as usize).wrapping_mul(0x85ebca6b);
-    (mixed ^ (mixed >> (usize::BITS / 2))) & mask
+    gate: EpochGated<Vec<Entry>>,
 }
 
 impl<'h> Heap<'h> {
@@ -53,20 +47,23 @@ impl<'h> Heap<'h> {
         set: BindingsView<'v, 'h>,
         name: Symbol,
     ) -> Option<AttrView<'v, 'h>> {
-        let address = set.pointer.as_ptr() as usize;
-        let index = slot(address, name, SLOTS - 1);
+        let identity = self.view_identity(set);
+        let tag = AddressTag::new(identity);
+        let index = tag.slot_mixed(name, SLOTS - 1);
         {
             let cache = self.attribute_cache.borrow();
-            if cache.collection == self.raw.stats().collections && !cache.entries.is_empty() {
-                let entry = cache.entries[index];
-                if entry.address == address && entry.name == name {
-                    // The set is live in this epoch; it still owns this cell.
-                    // The heap borrow prevents GC for the returned view's life.
-                    return entry.view();
+            if let Some(entries) = cache.gate.read(self.epoch()) {
+                if !entries.is_empty() {
+                    let entry = entries[index];
+                    if entry.tag.matches(identity) && entry.name == name {
+                        // The set is live in this epoch; it still owns this cell.
+                        // The heap borrow prevents GC for the returned view's life.
+                        return entry.view();
+                    }
                 }
             }
         }
-        self.lookup_attribute_miss(set, name, address, index)
+        self.lookup_attribute_miss(set, name, tag, index)
     }
 
     #[inline(never)]
@@ -74,23 +71,21 @@ impl<'h> Heap<'h> {
         &'v self,
         set: BindingsView<'v, 'h>,
         name: Symbol,
-        address: usize,
+        tag: AddressTag,
         index: usize,
     ) -> Option<AttrView<'v, 'h>> {
         let attr = set.get(name);
         // Neither lookup nor native cache allocation can collect the managed
-        // heap, so address and cell remain current until the entry is installed.
+        // heap, so tag and cell remain current until the entry is installed.
         let mut cache = self.attribute_cache.borrow_mut();
-        if cache.entries.is_empty() {
-            cache.entries = vec![Entry::EMPTY; SLOTS];
+        let entries = cache
+            .gate
+            .write_current(self.epoch(), |entries| entries.fill(Entry::EMPTY));
+        if entries.is_empty() {
+            *entries = vec![Entry::EMPTY; SLOTS];
         }
-        let collection = self.raw.stats().collections;
-        if cache.collection != collection {
-            cache.entries.fill(Entry::EMPTY);
-            cache.collection = collection;
-        }
-        cache.entries[index] = Entry {
-            address,
+        entries[index] = Entry {
+            tag,
             name,
             value: attr.map(|attr| attr.value.pointer),
             pos: attr.map_or(SrcPos::NONE, |attr| attr.pos),
@@ -102,15 +97,14 @@ impl<'h> Heap<'h> {
 #[cfg(feature = "work-counters")]
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct ProbeKey {
-    address: usize,
+    tag: AddressTag,
     name: u32,
 }
 
 #[cfg(feature = "work-counters")]
 #[derive(Default)]
 pub(super) struct AttributeProbeReuse {
-    collection: usize,
-    tables: [Vec<ProbeKey>; 2],
+    gate: EpochGated<[Vec<ProbeKey>; 2]>,
 }
 
 #[cfg(feature = "work-counters")]
@@ -134,25 +128,23 @@ impl<'h> Heap<'h> {
             &stats.attribute_probe_shapes[usize::from(set.len() > crate::bindings::FLAT_MAX)],
         );
         let key = ProbeKey {
-            address: set.pointer.as_ptr() as usize,
+            tag: AddressTag::new(self.view_identity(set)),
             name: name.0,
         };
         let mut reuse = self.attribute_probe_reuse.borrow_mut();
-        if reuse.tables[0].is_empty() {
-            reuse.tables = [
+        let tables = reuse.gate.write_current(self.epoch(), |tables| {
+            for table in tables {
+                table.fill(ProbeKey::default());
+            }
+        });
+        if tables[0].is_empty() {
+            *tables = [
                 vec![ProbeKey::default(); 4096],
                 vec![ProbeKey::default(); 16384],
             ];
         }
-        let collection = self.raw.stats().collections;
-        if reuse.collection != collection {
-            reuse.collection = collection;
-            for table in &mut reuse.tables {
-                table.fill(ProbeKey::default());
-            }
-        }
-        for (index, table) in reuse.tables.iter_mut().enumerate() {
-            let at = slot(key.address, name, table.len() - 1);
+        for (index, table) in tables.iter_mut().enumerate() {
+            let at = key.tag.slot_mixed(name, table.len() - 1);
             if table[at] == key {
                 crate::stats::Stats::bump_work(&stats.attribute_probe_reuse[index]);
                 crate::stats::Stats::bump_work(&stats.attribute_probe_sites[site][index + 1]);
@@ -220,10 +212,13 @@ mod tests {
                             } else {
                                 heap.collect_minor().unwrap();
                             }
-                            assert_ne!(
-                                heap.attribute_cache.borrow().collection,
-                                heap.stats().collections
-                            );
+                            // Every stored tag is unreadable in the new epoch.
+                            assert!(heap
+                                .attribute_cache
+                                .borrow()
+                                .gate
+                                .read(heap.epoch())
+                                .is_none());
                             let attr = heap
                                 .lookup_attribute(heap.bindings_view(set), present)
                                 .unwrap();

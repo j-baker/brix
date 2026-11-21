@@ -82,9 +82,10 @@ fn derivation_cache_does_not_survive_collection_or_keep_sets_alive() {
                     heap.cache_derivation(set, true);
                     assert_eq!(heap.cached_derivation(set), Some(true));
                     // Even a stationary old object must not reuse a prior epoch.
-                    let identity = heap.bindings_identity(set).address;
+                    // A storable tag outlives the collection; identities do not.
+                    let tag = identity::AddressTag::new(heap.bindings_identity(set));
                     heap.collect_minor().unwrap();
-                    assert_eq!(heap.bindings_identity(set).address, identity);
+                    assert!(tag.matches(heap.bindings_identity(set)));
                     assert_eq!(heap.cached_derivation(set), None);
                     heap.cache_derivation(set, false);
                     heap.collect().unwrap();

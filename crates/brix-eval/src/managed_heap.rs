@@ -16,6 +16,16 @@ use std::ptr::NonNull;
 use std::rc::{Rc, Weak};
 
 use brix_gc::raw::{RawHeap, Tracer};
+// Raw heap layouts are a private child: no module outside this subtree can
+// name a movable pointer type, so holding one across a collection is a
+// compile error everywhere except the audited implementation below.
+#[path = "heap_layout.rs"]
+mod heap_layout;
+// Safe persistent attribute sets live inside the wall for their test-only
+// layout accesses, but must stay free of unsafe code themselves.
+#[deny(unsafe_code)]
+#[path = "managed_bindings.rs"]
+pub(crate) mod managed_bindings;
 #[cfg(brix_parallel)]
 #[path = "parallel/heap.rs"]
 mod parallel_heap;
@@ -24,10 +34,12 @@ mod weak_seen;
 use brix_gc::roots::{self as raw_roots, RootDescriptor, RootKind, RootRegistry};
 use brix_gc::{Config, Error, Result, Stats};
 use brix_store::AccessorId;
+use identity::Epoch;
+pub(crate) use identity::Identity;
 use smallvec::SmallVec;
 pub(crate) use weak_seen::{Address, WeakSeen};
 
-use crate::heap_layout::*;
+use self::heap_layout::*;
 use crate::symbol::Symbol;
 use crate::value::{GlobalNode, SrcPos};
 
@@ -64,16 +76,9 @@ unsafe fn trace_pointer(pointer: NonNull<u8>, tracer: &mut Tracer<'_>) {
     }
 }
 unsafe fn trace_slice<T>(pointer: NonNull<u8>, tracer: &mut Tracer<'_>) {
-    unsafe {
-        let slot = pointer.cast::<RawSlice<T>>().as_ptr();
-        let mut slice = slot.read();
-        if slice.len != 0 {
-            slice.ptr = tracer.relocate(slice.ptr.cast()).cast();
-        } else {
-            slice = RawSlice::empty();
-        }
-        slot.write(slice);
-    }
+    // A rooted slice snapshot follows the same relocation and empty-slice
+    // canonicalization rules as a heap slice field; keep one implementation.
+    unsafe { heap_layout::TraceField::trace_field(pointer.cast::<RawSlice<T>>().as_ptr(), tracer) };
 }
 const fn descriptor<T>(trace: unsafe fn(NonNull<u8>, &mut Tracer<'_>)) -> RootDescriptor {
     RootDescriptor {
@@ -361,13 +366,6 @@ pub(crate) struct Visited<'h> {
     brand: Brand<'h>,
 }
 
-/// Opaque identity valid only while its heap is immutably borrowed.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Identity<'v> {
-    address: usize,
-    borrow: PhantomData<&'v ()>,
-}
-
 impl<'h> Heap<'h> {
     /// Leave the managed graph while an operation on owned data blocks. The
     /// exclusive borrow excludes live heap views; roots remain registered.
@@ -479,6 +477,11 @@ impl<'h> Heap<'h> {
             brand: PhantomData,
         }
     }
+    // Address-to-integer audit: heap addresses become integers only in the
+    // `identity` module (epoch-gated cache tags) and in the three `mark_*`
+    // methods below, whose `weak_seen`/`Visited` sets follow relocation and
+    // drop dead entries before an address can be reused. Nothing else in the
+    // crate may extract a numeric address from the moving heap.
     pub fn mark_visited(&self, visited: &Visited<'h>, cell: CellRoot<'_, 'h>) -> bool {
         visited.cells.borrow_mut().insert(cell.raw.read().addr())
     }
@@ -498,16 +501,22 @@ impl<'h> Heap<'h> {
             .insert(bindings.raw.read().addr())
     }
     pub fn cell_identity(&self, cell: CellRoot<'_, 'h>) -> Identity<'_> {
-        Identity {
-            address: cell.raw.read().as_ptr() as usize,
-            borrow: PhantomData,
-        }
+        Identity::from_pointer(cell.raw.read().cast())
     }
     pub fn bindings_identity(&self, bindings: BindingsRoot<'_, 'h>) -> Identity<'_> {
-        Identity {
-            address: bindings.raw.read().as_ptr() as usize,
-            borrow: PhantomData,
-        }
+        Identity::from_pointer(bindings.raw.read().cast())
+    }
+    /// Identity of a borrowed set; the result shares the view's heap borrow.
+    #[inline]
+    fn view_identity<'v>(&self, set: BindingsView<'v, 'h>) -> Identity<'v> {
+        Identity::from_pointer(set.pointer.cast())
+    }
+    /// The current collection count as an opaque cache-gating stamp. Every
+    /// successful collection advances it, so an `identity::EpochGated` store
+    /// keyed by this value can never yield a tag minted before objects moved.
+    #[inline]
+    fn epoch(&self) -> Epoch {
+        Epoch::new(self.raw.stats().collections)
     }
     pub fn seen_count(&self) -> usize {
         self.weak_seen.len()
@@ -653,13 +662,17 @@ impl<'h> Heap<'h> {
         }
         Ok(roots.push::<CellKind>(pointer))
     }
+    /// The only place a published cell is overwritten; `env_set` and
+    /// `env_set_up` are the environment counterparts. Together those three
+    /// are the complete audited write-barrier surface of the serial heap —
+    /// route every new mutation of a published object through one of them.
+    /// Immediate values and Blackhole cannot introduce an old-to-young edge,
+    /// and removing an edge needs no barrier; an existing dirty bit remains
+    /// conservative. Does not allocate or collect.
     #[inline]
     #[cfg(not(brix_parallel))]
-    pub fn store(&mut self, cell: CellRoot<'_, 'h>, value: ValueRoot<'_, 'h>) {
+    fn publish_cell(&mut self, cell: CellRoot<'_, 'h>, value: RawValue) {
         let pointer = cell.raw.read();
-        let value = value.raw.read();
-        // Immediate values cannot introduce an old-to-young edge. Removing
-        // an edge needs no barrier; an existing dirty bit remains conservative.
         if !matches!(
             value,
             RawValue::Int(_)
@@ -673,33 +686,37 @@ impl<'h> Heap<'h> {
         }
         unsafe { pointer.as_ptr().write(RawCell::new(value)) };
     }
+    /// The parallel publication protocol applies the same edge test before
+    /// its deferred barrier; see `parallel_heap`'s `publish`.
+    #[inline]
+    #[cfg(brix_parallel)]
+    fn publish_cell(&mut self, cell: CellRoot<'_, 'h>, value: RawValue) {
+        self.publish(cell, value);
+    }
+    #[inline]
+    #[cfg(not(brix_parallel))]
+    pub fn store(&mut self, cell: CellRoot<'_, 'h>, value: ValueRoot<'_, 'h>) {
+        self.publish_cell(cell, value.raw.read());
+    }
     /// Restore a thunk from its rooted environment and immutable code ID.
     /// This does not allocate, collect, or require an intermediate value root.
     #[inline]
     #[cfg(not(brix_parallel))]
     pub fn store_thunk(&mut self, cell: CellRoot<'_, 'h>, env: EnvRoot<'_, 'h>, node: GlobalNode) {
-        self.raw.write_barrier(cell.raw.read().cast());
-        unsafe {
-            cell.raw
-                .read()
-                .as_ptr()
-                .write(RawCell::new(RawValue::Thunk {
-                    env: env.raw.read(),
-                    node,
-                }));
-        }
+        self.publish_cell(
+            cell,
+            RawValue::Thunk {
+                env: env.raw.read(),
+                node,
+            },
+        );
     }
     /// Blackholing writes an immediate tag and cannot collect; no temporary
     /// value root is required. The caller roots the saved suspension separately.
     #[inline]
     #[cfg(not(brix_parallel))]
     pub fn store_blackhole(&mut self, cell: CellRoot<'_, 'h>) {
-        unsafe {
-            cell.raw
-                .read()
-                .as_ptr()
-                .write(RawCell::new(RawValue::Blackhole));
-        }
+        self.publish_cell(cell, RawValue::Blackhole);
     }
     pub fn bytes<'r>(&mut self, roots: &Roots<'r, 'h>, bytes: &[u8]) -> Result<BytesRoot<'r, 'h>> {
         if bytes.is_empty() {
@@ -1323,6 +1340,9 @@ impl<'h> Heap<'h> {
     pub fn env_view<'v>(&'v self, root: EnvRoot<'_, 'h>) -> EnvView<'v, 'h> {
         EnvView::new(root.raw.read())
     }
+    /// With `env_set_up` and `publish_cell`, one of the three audited
+    /// mutators of published objects: a stored cell edge is always preceded
+    /// by its owner's barrier. Does not allocate or collect.
     pub fn env_set(&mut self, env: EnvRoot<'_, 'h>, index: usize, cell: CellRoot<'_, 'h>) {
         self.raw.write_barrier(env.raw.read().cast());
         unsafe {
@@ -1341,6 +1361,7 @@ impl<'h> Heap<'h> {
         }
     }
     /// Set a lexical parent after registering a cyclic bootstrap graph.
+    /// Part of the audited barrier surface (see `publish_cell`).
     pub fn env_set_up(&mut self, env: EnvRoot<'_, 'h>, up: Option<EnvRoot<'_, 'h>>) {
         self.raw.write_barrier(env.raw.read().cast());
         unsafe {
@@ -1386,20 +1407,17 @@ impl<'h> Heap<'h> {
         let cell = roots.push::<CellKind>(pointer);
         // SAFETY: APP describes the nonzero, unpadded RawApp layout.
         let app = unsafe { self.reserve_fixed::<{ size_of::<RawApp>() }>(APP)? }.cast::<RawApp>();
-        // The cell may have been promoted while reserving its application.
-        self.raw.write_barrier(cell.raw.read().cast());
         // Reload all three roots after the collecting reservation, then publish
         // the application through the cell without another collecting call.
+        // The cell may have been promoted while reserving its application;
+        // publish_cell therefore takes its barrier only now, on the reloaded root.
         unsafe {
             app.as_ptr().write(RawApp {
                 fun: fun.raw.read(),
                 arg: arg.raw.read(),
             });
-            cell.raw
-                .read()
-                .as_ptr()
-                .write(RawCell::new(RawValue::App(app)));
         }
+        self.publish_cell(cell, RawValue::App(app));
         Ok(cell)
     }
 
@@ -3447,3 +3465,6 @@ mod equality_profile;
 
 mod attribute_cache;
 mod derivation_cache;
+// No unsafe: identity turns addresses into integers without dereferencing.
+#[deny(unsafe_code)]
+mod identity;

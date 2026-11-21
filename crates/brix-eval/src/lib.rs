@@ -20,10 +20,11 @@
 //! assert_eq!(ev.print_ambiguous(ev.alloc_cell(v)).unwrap(), "42");
 //! ```
 
-// The only places that need `unsafe` are the managed heap (`heap_layout.rs`
-// and `managed_heap.rs`, whose allowance also covers its submodules
-// `managed_heap/weak_seen.rs`, the tests, and, in the parallel build,
-// `parallel/heap.rs`), `GcEvaluator::new` in
+// The only places that need `unsafe` are the managed heap (`managed_heap.rs`,
+// whose allowance also covers its submodules: `heap_layout.rs`, the
+// `managed_heap/` caches, the tests, and, in the parallel build,
+// `parallel/heap.rs` — but not `managed_bindings.rs` or
+// `managed_heap/identity.rs`, which re-deny it), `GcEvaluator::new` in
 // `managed_api.rs`, and, in the parallel build only, the locked arena and
 // `Published::get` in `runtime.rs`; everything else must do without.
 #![deny(unsafe_code)]
@@ -40,7 +41,6 @@ mod error;
 mod eval;
 mod evaluator;
 mod grisu;
-mod heap_layout;
 mod host;
 pub mod image;
 mod import;
@@ -48,7 +48,8 @@ pub mod ir;
 pub mod json;
 pub mod lazy_tree;
 pub mod managed_api;
-pub(crate) mod managed_bindings;
+// Inside the heap wall (see `managed_heap`); this alias keeps callers' paths.
+pub(crate) use crate::managed_heap::managed_bindings;
 pub(crate) mod managed_builtins;
 pub(crate) mod managed_builtins_data;
 pub(crate) mod managed_builtins_derivation;

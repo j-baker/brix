@@ -70,9 +70,15 @@ let
 
   # Extra cargo features for a member's test build. brix-eval's image tests
   # compare the work counters (thunks, environments, calls) of source and
-  # image evaluation; release builds compile those counters out.
+  # image evaluation; release builds compile those counters out. The tests
+  # that integrate with external programs (`git` over ssh/file, `hg`,
+  # commit verification) need `external-programs`, which the release
+  # package (features = ["default"] below) does not get: a released brix
+  # spawns no processes.
   testFeatures = {
     "brix-eval" = [ "work-counters" ];
+    "brix-flake" = [ "external-programs" ];
+    "brix-cli" = [ "external-programs" ];
   };
 
   # crate2nix runs a crate's tests in a separate derivation, and the test

@@ -2613,14 +2613,105 @@ fn develop_errors_match_nix() {
         assert_eq!(ours.status, theirs.status, "{args:?}: {}", ours.stderr);
         assert_eq!(ours.stderr, theirs.stderr, "{args:?}");
     }
-    let out = run(brix().args(["develop", "--profile", "p", "--expr", not_bash]));
-    assert_eq!(out.status, 1);
-    assert!(
-        out.stderr
-            .contains("'--profile' is not supported: brix does not manage profiles"),
-        "{}",
-        out.stderr
-    );
+}
+
+/// Every link in `dir` with its target, sorted, `dir` itself elided.
+fn links_in(dir: &Path) -> Vec<(String, String)> {
+    let mut links: Vec<(String, String)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read_link(e.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        })
+        .collect();
+    links.sort();
+    links
+}
+
+/// `--profile` on `print-dev-env` (what nix-direnv runs) and `build`:
+/// the generations and the profile link Nix makes, and its errors.
+#[test]
+#[ignore = "builds through the real Nix daemon; set BRIX_TEST_REAL_DAEMON=1"]
+fn profile_matches_nix() {
+    require_env(REAL_DAEMON);
+    let flake = dev_flake(&nonce());
+    let dir = flake.path();
+    // One profile directory each, so that the same arguments compare.
+    let (ours, theirs) = (dir.join("ours"), dir.join("theirs"));
+    for d in [&ours, &theirs] {
+        std::fs::create_dir(d).unwrap();
+    }
+    // What a command printed, without the directory it ran in or the
+    // program a usage error names.
+    let said = |out: &Output, d: &Path| {
+        let d = d.display().to_string();
+        (
+            out.status,
+            out.stdout.replace(&d, "DIR"),
+            out.stderr
+                .split("\nTry '")
+                .next()
+                .unwrap()
+                .replace(&d, "DIR"),
+        )
+    };
+    let both = |args: &[&str]| {
+        let (b, n) = (brix_store_in(&ours, args), nix_in(&theirs, args));
+        assert_eq!(said(&b, &ours), said(&n, &theirs), "{args:?}");
+        let links = links_in(&ours);
+        assert_eq!(links, links_in(&theirs), "{args:?}");
+        links
+    };
+    let dev_env = ["print-dev-env", "--profile", "p", ".."];
+    let hello = format!("path:{}#hello", nixpkgs());
+    let build = ["build", "--no-link", "--profile", "p", SHELL];
+    const SHELL: &str = "..#devShells.x86_64-linux.default";
+    // Built beforehand, so that neither run says it is building.
+    ok(brix_store_in(dir, &["print-dev-env", "."]));
+    ok(brix_store_in(&ours, &["build", "--no-link", &hello, SHELL]));
+
+    // The first generation, and the profile a link to it by name.
+    let links = both(&dev_env);
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert_eq!(links[0], ("p".into(), "p-1-link".into()));
+    assert_eq!(links[1].0, "p-1-link");
+    assert!(links[1].1.ends_with("-nix-shell-env"), "{links:?}");
+    // The same path again makes no new generation; another path does,
+    // and going back makes a third.
+    assert_eq!(both(&dev_env), links);
+    let links = both(&build);
+    assert_eq!(links.len(), 3, "{links:?}");
+    assert_eq!(links[0], ("p".into(), "p-2-link".into()));
+    let links = both(&dev_env);
+    assert_eq!(links.len(), 4, "{links:?}");
+    assert_eq!(links[0], ("p".into(), "p-3-link".into()));
+    // The generations are GC roots: the daemon keeps a link to each.
+    let roots: Vec<PathBuf> = std::fs::read_dir("/nix/var/nix/gcroots/auto")
+        .unwrap()
+        .filter_map(|e| std::fs::read_link(e.unwrap().path()).ok())
+        .collect();
+    for generation in ["p-1-link", "p-2-link", "p-3-link"] {
+        let root = ours.join(generation);
+        assert!(roots.contains(&root), "{root:?} is not a root");
+    }
+
+    // A profile takes one store path; its directory must exist; and it
+    // must be a link if it is there.
+    both(&["build", "--no-link", "--profile", "q", &hello, SHELL]);
+    both(&["build", "--no-link", "--profile", "missing/q", SHELL]);
+    for d in [&ours, &theirs] {
+        std::fs::write(d.join("file"), "").unwrap();
+    }
+    let file = ["build", "--no-link", "--profile", "file", SHELL];
+    let (b, n) = (brix_store_in(&ours, &file), nix_in(&theirs, &file));
+    assert_eq!(said(&b, &ours), said(&n, &theirs));
+    assert!(b.stderr.contains("reading symbolic link"), "{}", b.stderr);
 }
 
 // ---------------------------------------------------------------------

@@ -29,6 +29,7 @@ pub mod formatter;
 pub mod hash;
 pub mod help;
 pub mod path_info;
+pub mod profile;
 pub mod realise;
 pub mod search;
 

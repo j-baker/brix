@@ -378,8 +378,6 @@ brix accepts it.
 
 ### Flags brix does not implement
 
-- `--profile` on `build` and `develop`: "'--profile' is not supported:
-  brix does not manage profiles".
 - `--commit-lock-file`, `--inputs-from` and `--override-flake`: "'…' is
   not supported by brix yet".
 

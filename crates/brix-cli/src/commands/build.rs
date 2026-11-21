@@ -36,7 +36,7 @@ pub fn add_perm_root(session: &Session, path: &StorePath, gc_root: impl AsRef<[u
 
 /// `what`, then `path` in double quotes (`PathFmt`), then `after`: a
 /// message or an error's context naming a path, its bytes as they are.
-fn quoting(what: &str, path: &[u8], after: &str) -> Vec<u8> {
+pub(crate) fn quoting(what: &str, path: &[u8], after: &str) -> Vec<u8> {
     [what.as_bytes(), b"\"", path, b"\"", after.as_bytes()].concat()
 }
 
@@ -216,11 +216,6 @@ fn built_path_json(store_dir: &brix::StoreDir, b: &Built) -> Result<Value> {
 
 /// `nix build`.
 pub fn build(ctx: &Ctx<'_>) -> Result<()> {
-    if ctx.inv.has("profile") {
-        return Err(CliError::msg(
-            "'--profile' is not supported: brix does not manage profiles",
-        ));
-    }
     let session = ctx.session()?;
     let mut resolver = ctx.resolver(&session, &["nix-build"])?;
     let installables = ctx.installables(&resolver)?;
@@ -288,6 +283,11 @@ pub fn build(ctx: &Ctx<'_>) -> Result<()> {
         }
         print_stdout(&out)?;
     }
+    let paths: Vec<&StorePath> = built
+        .iter()
+        .flat_map(|b| b.outputs.iter().map(|(_, p)| p))
+        .collect();
+    crate::commands::profile::update_profile_built(ctx, &session, &paths)?;
     Ok(())
 }
 

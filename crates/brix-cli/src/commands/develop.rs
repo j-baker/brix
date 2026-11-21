@@ -289,11 +289,6 @@ struct Common<'c, 's> {
 
 impl<'c, 's> Common<'c, 's> {
     fn new(ctx: &'c Ctx<'c>, session: &'s Session) -> Result<Common<'c, 's>> {
-        if ctx.inv.has("profile") {
-            return Err(CliError::msg(
-                "'--profile' is not supported: brix does not manage profiles",
-            ));
-        }
         let resolver = ctx.resolver(session, &["nix-develop"])?;
         let installable = ctx.installable(&resolver)?;
         Ok(Common {
@@ -309,6 +304,7 @@ impl<'c, 's> Common<'c, 's> {
     fn build_environment(&mut self) -> Result<(BuildEnvironment, StorePath)> {
         let store_dir = self.session.config().store_dir().clone();
         let (shell_out, contents) = self.shell_out()?;
+        crate::commands::profile::update_profile(self.ctx, self.session, &shell_out)?;
         let contents = match contents {
             Some(c) => c,
             None => self
